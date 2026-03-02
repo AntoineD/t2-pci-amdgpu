@@ -221,16 +221,31 @@ systemctl daemon-reload
 say "Drop-in installed: ${drop_file}"
 
 say "✅ Installation finished."
-echo ""
-echo ""
-echo " ============================ /etc/default/grub.cfg ================="
-echo "here the recommanded parameter for grub.  Add/Change lines in your /etc/default/grub.cfg"
-echo " ============================ /etc/default/grub.cfg ================="
-echo "GRUB_EARLY_INITRD_LINUX_CUSTOM=\"acpi_override.img\"             #Required"
-echo "GRUB_CMDLINE_LINUX=\"pci=noaer pcie_aspm=off amdgpu.aspm=0\"     #Backup your file, and others else parameters"
-echo "                                                               can interfired"
-echo ""
-echo "regenerate your grub.cfg" 
-echo ""
-echo "Reboot when you are ready."
+
+# Detect boot mode and print the correct grub2-mkconfig command
+if [[ -d /sys/firmware/efi ]]; then
+  _grub_target="/boot/efi/EFI/fedora/grub.cfg"
+  _boot_mode="EFI"
+else
+  _grub_target="/boot/grub2/grub.cfg"
+  _boot_mode="Legacy BIOS"
+fi
+
+cat <<EOF
+
+====== Required: /etc/default/grub (boot mode detected: ${_boot_mode}) ======
+
+Add or adjust these lines in /etc/default/grub, then regenerate grub.cfg:
+
+  GRUB_EARLY_INITRD_LINUX_CUSTOM="acpi_override.img"
+  GRUB_CMDLINE_LINUX="pci=noaer pcie_aspm=off amdgpu.aspm=0"
+  (remove 'nomodeset' from GRUB_CMDLINE_LINUX if present)
+
+Regenerate grub config:
+  sudo grub2-mkconfig -o ${_grub_target}
+
+Then reboot when ready.
+======================================================================
+
+EOF
 
