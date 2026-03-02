@@ -1,15 +1,47 @@
 # Stage 2: remove/rescan PCI functions
 # NOTE: install.sh will replace ADDR with the slot root (e.g., "03:00").
 #       The "0000:" domain prefix is kept literal here to stay stable across systems.
-for dev in /sys/bus/pci/devices/0000:ADDR.{1,0}; do
-  if [ -e "$dev" ]; then
-    if [[ "$dev" == *".1" ]]; then
-      log "Stage 2: remove $dev (audio)"
-    else
-      log "Stage 2: remove $dev + rescan"
+
+pci_remove_rescan() {
+  for dev in /sys/bus/pci/devices/0000:ADDR.{1,0}; do
+    if [ -e "$dev" ]; then
+      if [[ "$dev" == *".1" ]]; then
+        log "remove $dev (audio)"
+      else
+        log "remove $dev (vga)"
+      fi
+      echo 1 >"$dev/remove"
+      sleep 1
     fi
-    echo 1 >"$dev/remove"
+  done
+  log "rescanning PCI bus"
+  echo 1 >/sys/bus/pci/rescan
+}
+
+wait_for_gpu() {
+  local max_wait=20
+  for i in $(seq 1 "$max_wait"); do
+    if ls /dev/dri/renderD* &>/dev/null; then
+      log "GPU ready after ${i}s: $(ls /dev/dri/renderD*)"
+      return 0
+    fi
     sleep 1
+  done
+  return 1
+}
+
+log "Stage 2: PCI remove/rescan (attempt 1)"
+pci_remove_rescan
+
+if wait_for_gpu; then
+  log "Stage 2: GPU initialized successfully"
+else
+  log "Stage 2: GPU not ready after first attempt — retrying"
+  pci_remove_rescan
+  sleep 5
+  if wait_for_gpu; then
+    log "Stage 2: GPU initialized on retry"
+  else
+    log "Stage 2: WARNING — GPU still not visible after retry; check dmesg"
   fi
-done
-echo 1 > /sys/bus/pci/rescan
+fi
