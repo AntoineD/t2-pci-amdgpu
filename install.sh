@@ -222,6 +222,18 @@ EOF
 chmod 0644 "$DRACUT_CONF"
 say "Dracut config installed: ${DRACUT_CONF}"
 
+# --- 6b) Dracut cmdline fallback config --------------------------------------
+DRACUT_CMDLINE_SRC="${SRC_DIR}/20-amdgpu-t2-cmdline.conf"
+DRACUT_CMDLINE_DST="${DRACUT_DIR}/20-amdgpu-t2-cmdline.conf"
+if [[ -f "$DRACUT_CMDLINE_SRC" ]]; then
+  say "Installing dracut cmdline fallback config: ${DRACUT_CMDLINE_DST}"
+  backup "$DRACUT_CMDLINE_DST"
+  install -Dm0644 "$DRACUT_CMDLINE_SRC" "$DRACUT_CMDLINE_DST"
+  say "Installed: ${DRACUT_CMDLINE_DST}"
+else
+  warn "Dracut cmdline config not found: ${DRACUT_CMDLINE_SRC} — skipping"
+fi
+
 # --- 7) Display manager drop-in (symlink-aware) ------------------------------
 say "Configuring display-manager drop-in (symlink-aware)"
 dm_unit="/etc/systemd/system/display-manager.service"
