@@ -95,7 +95,7 @@ if [[ -f "$TEMPLATE" ]]; then
     exit 1
   fi
   slot_root="${gpu_bdf%.*}"                # e.g., 0000:03:00
-  slot_root="${slot_root#0000:}"           # template keeps the '0000:' prefix literal
+  slot_root="${slot_root#????:}"           # strip any 4-hex-digit domain; template keeps '0000:' literal
   backup "$TARGET"
   {
     cat <<'HDR'
