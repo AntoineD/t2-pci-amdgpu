@@ -12,7 +12,7 @@
 # Usage:
 #   sudo ./install.sh 
 #
-set -euo pipefail
+set -Eeuo pipefail
 
 # --- Debug helpers -----------------------------------------------------------
 # Enable verbose tracing & failure trap with DEBUG=1
@@ -20,7 +20,6 @@ if [[ "${DEBUG:-0}" = "1" ]]; then
   PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
   set -x
 fi
-set -o errtrace
 trap 'ec=$?; echo "[✗] FAILED at ${BASH_SOURCE##*/}:${LINENO} → ${BASH_COMMAND} (exit $ec)"; exit $ec' ERR
 
 say()  { printf "\033[1;36m==>\033[0m %s\n" "$*"; }
