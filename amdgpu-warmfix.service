@@ -1,0 +1,19 @@
+# /etc/systemd/system/amdgpu-warmfix.service
+[Unit]
+Description=AMDGPU Warmfix (PCIe reset/remove-rescan + late modprobe)
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+ConditionKernelCommandLine=!nomodeset
+ConditionKernelCommandLine=!amdgpu.modeset=0
+# >>> ajoute ceci <<<
+Before=gdm.service display-manager.service graphical.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/amdgpu-pci-reset-load.sh
+TimeoutStartSec=180
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+

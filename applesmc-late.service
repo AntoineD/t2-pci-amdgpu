@@ -1,0 +1,11 @@
+[Unit]
+Description=Load applesmc after Apple T2 bridge is ready
+
+[Service]
+Type=oneshot
+# Attend jusqu'à 10s que apple_bce soit chargé
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 10); do [ -d /sys/module/apple_bce ] && exit 0; sleep 1; done; exit 1'
+ExecStart=/sbin/modprobe applesmc
+
+[Install]
+WantedBy=multi-user.target

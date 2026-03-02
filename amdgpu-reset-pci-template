@@ -1,0 +1,15 @@
+# Stage 2: remove/rescan PCI functions
+# NOTE: install.sh will replace ADDR with the slot root (e.g., "03:00").
+#       The "0000:" domain prefix is kept literal here to stay stable across systems.
+for dev in /sys/bus/pci/devices/0000:ADDR.{1,0}; do
+  if [ -e "$dev" ]; then
+    if [[ "$dev" == *".1" ]]; then
+      log "Stage 2: remove $dev (audio)"
+    else
+      log "Stage 2: remove $dev + rescan"
+    fi
+    echo 1 >"$dev/remove"
+    sleep 1
+  fi
+done
+echo 1 > /sys/bus/pci/rescan

@@ -1,0 +1,21 @@
+# /etc/systemd/system/t2fanrd.service
+[Unit]
+Description=T2 fan daemon
+After=systemd-modules-load.service systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=simple
+ExecStartPre=/usr/sbin/modprobe apple_bce
+ExecStartPre=/usr/bin/udevadm settle
+ExecStartPre=/usr/sbin/modprobe applesmc
+# t2fanrd sait scanner /sys; pas besoin d’un chemin codé en dur
+ExecStart=/usr/local/bin/t2fanrd --config /etc/t2fanrd.conf
+Restart=always
+RestartSec=5
+# repasse en auto si on stoppe le service
+ExecStopPost=/usr/bin/bash -lc 'echo 0 >/sys/devices/*/APP0001:*/fan1_manual 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target
+
