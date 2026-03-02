@@ -5,7 +5,7 @@ After=systemd-udev-settle.service
 Wants=systemd-udev-settle.service
 ConditionKernelCommandLine=!nomodeset
 ConditionKernelCommandLine=!amdgpu.modeset=0
-# >>> ajoute ceci <<<
+# ensure display manager starts after warmfix
 Before=gdm.service display-manager.service graphical.target
 
 [Service]
