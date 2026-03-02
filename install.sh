@@ -31,14 +31,6 @@ backup(){ [[ -e "$1" ]] || return 0; local ts; ts="$(date +%Y%m%d-%H%M%S)"; cp -
 
 require_root(){ [[ $EUID -eq 0 ]] || { err "Run this script with sudo/root."; exit 1; }; }
 
-WITH_DRACUT=0
-for arg in "$@"; do
-  case "$arg" in
-    --with-dracut) WITH_DRACUT=1 ;;
-    *) err "Unknown argument: $arg" ; exit 1 ;;
-  esac
-done
-
 # --- Paths -------------------------------------------------------------------
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="/usr/local/bin"
