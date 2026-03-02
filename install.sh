@@ -131,6 +131,18 @@ for f in "${SRC_DIR}"/*.sh; do
   say "Installed script: ${BIN_DIR}/${base}"
 done
 
+# --- Install standalone binaries ---------------------------------------------
+for bin in t2fanrd; do
+  src="${SRC_DIR}/${bin}"
+  if [[ -f "$src" ]]; then
+    backup "${BIN_DIR}/${bin}"
+    install -Dm0755 "$src" "${BIN_DIR}/${bin}"
+    say "Installed binary: ${BIN_DIR}/${bin}"
+  else
+    warn "Binary not found in source dir: ${bin} — skipping"
+  fi
+done
+
 # --- 4) systemd: daemon-reload + enable services -----------------------------
 say "Reloading systemd units"
 systemctl daemon-reload
