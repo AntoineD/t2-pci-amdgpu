@@ -163,7 +163,20 @@ enable_if_present "amdgpu-warmfix.service"
 enable_if_present "t2fanrd.service"
 enable_if_present "applesmc-late.service"
 
-# --- 5) Display manager drop-in (symlink-aware) ------------------------------
+# --- 5) Dracut config (embed required drivers in initramfs) ------------------
+say "Writing dracut config: ${DRACUT_CONF}"
+mkdir -p "$DRACUT_DIR"
+if [[ -f "$DRACUT_CONF" ]]; then
+  backup "$DRACUT_CONF"
+fi
+cat > "$DRACUT_CONF" <<'EOF'
+# 10-amdgpu-warmfix.conf — embed GPU and T2-related drivers in initramfs
+add_drivers+=" amdgpu nvme thunderbolt pcieport "
+EOF
+chmod 0644 "$DRACUT_CONF"
+say "Dracut config installed: ${DRACUT_CONF}"
+
+# --- 6) Display manager drop-in (symlink-aware) ------------------------------
 say "Configuring display-manager drop-in (symlink-aware)"
 dm_unit="/etc/systemd/system/display-manager.service"
 if [[ -L "$dm_unit" ]]; then
