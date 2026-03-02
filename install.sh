@@ -31,6 +31,18 @@ backup(){ [[ -e "$1" ]] || return 0; local ts; ts="$(date +%Y%m%d-%H%M%S)"; cp -
 
 require_root(){ [[ $EUID -eq 0 ]] || { err "Run this script with sudo/root."; exit 1; }; }
 
+check_deps(){
+  local missing=()
+  for cmd in cpio gzip systemctl modprobe realpath install; do
+    command -v "$cmd" &>/dev/null || missing+=("$cmd")
+  done
+  if (( ${#missing[@]} )); then
+    err "Missing required tools: ${missing[*]}"
+    err "Install them and retry."
+    exit 1
+  fi
+}
+
 # --- Paths -------------------------------------------------------------------
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="/usr/local/bin"
@@ -41,6 +53,7 @@ ACPI_IMG="/boot/acpi_override.img"
 ACPI_SRC="${SRC_DIR}/GFXALT-multi.aml"
 
 require_root
+check_deps
 say "Starting amdgpu warmfix installation"
 say "Source directory: ${SRC_DIR}"
 ls -al "${SRC_DIR}" || true
