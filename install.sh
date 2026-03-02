@@ -163,7 +163,29 @@ enable_if_present "amdgpu-warmfix.service"
 enable_if_present "t2fanrd.service"
 enable_if_present "applesmc-late.service"
 
-# --- 5) Dracut config (embed required drivers in initramfs) ------------------
+# --- 5) Default t2fanrd config -----------------------------------------------
+T2FANRD_CONF="/etc/t2fanrd.conf"
+if [[ -f "$T2FANRD_CONF" ]]; then
+  say "t2fanrd config already exists: ${T2FANRD_CONF} — skipping"
+else
+  say "Creating default t2fanrd config: ${T2FANRD_CONF}"
+  cat > "$T2FANRD_CONF" <<'EOF'
+# /etc/t2fanrd.conf — T2 fan daemon configuration
+# Adjust low_temp/high_temp (°C) to suit your hardware.
+# speed_curve: linear | exponential | logarithmic
+# always_full_speed: true | false
+
+[fan1]
+low_temp = 55
+high_temp = 85
+speed_curve = linear
+always_full_speed = false
+EOF
+  chmod 0644 "$T2FANRD_CONF"
+  warn "Default t2fanrd.conf created. Review ${T2FANRD_CONF} and adjust thresholds for your hardware."
+fi
+
+# --- 6) Dracut config (embed required drivers in initramfs) ------------------
 say "Writing dracut config: ${DRACUT_CONF}"
 mkdir -p "$DRACUT_DIR"
 if [[ -f "$DRACUT_CONF" ]]; then
@@ -176,7 +198,7 @@ EOF
 chmod 0644 "$DRACUT_CONF"
 say "Dracut config installed: ${DRACUT_CONF}"
 
-# --- 6) Display manager drop-in (symlink-aware) ------------------------------
+# --- 7) Display manager drop-in (symlink-aware) ------------------------------
 say "Configuring display-manager drop-in (symlink-aware)"
 dm_unit="/etc/systemd/system/display-manager.service"
 if [[ -L "$dm_unit" ]]; then
