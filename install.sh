@@ -147,6 +147,18 @@ for bin in t2fanrd; do
   fi
 done
 
+# --- 3a) modprobe.d config ---------------------------------------------------
+MODPROBE_SRC="${SRC_DIR}/amdgpu.conf"
+MODPROBE_DST="/etc/modprobe.d/amdgpu.conf"
+if [[ -f "$MODPROBE_SRC" ]]; then
+  say "Installing modprobe config: ${MODPROBE_DST}"
+  backup "$MODPROBE_DST"
+  install -Dm0644 "$MODPROBE_SRC" "$MODPROBE_DST"
+  say "Installed: ${MODPROBE_DST}"
+else
+  warn "modprobe config not found: ${MODPROBE_SRC} — skipping"
+fi
+
 # --- 4) systemd: daemon-reload + enable services -----------------------------
 say "Reloading systemd units"
 systemctl daemon-reload
