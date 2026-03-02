@@ -159,6 +159,19 @@ else
   warn "modprobe config not found: ${MODPROBE_SRC} — skipping"
 fi
 
+# --- 3b) udev rules ----------------------------------------------------------
+UDEV_SRC="${SRC_DIR}/99-amdgpu-t2.rules"
+UDEV_DST="/etc/udev/rules.d/99-amdgpu-t2.rules"
+if [[ -f "$UDEV_SRC" ]]; then
+  say "Installing udev rules: ${UDEV_DST}"
+  backup "$UDEV_DST"
+  install -Dm0644 "$UDEV_SRC" "$UDEV_DST"
+  udevadm control --reload-rules
+  say "Installed and reloaded: ${UDEV_DST}"
+else
+  warn "udev rules not found: ${UDEV_SRC} — skipping"
+fi
+
 # --- 4) systemd: daemon-reload + enable services -----------------------------
 say "Reloading systemd units"
 systemctl daemon-reload
