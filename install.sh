@@ -131,15 +131,6 @@ for f in "${SRC_DIR}"/*.sh; do
   say "Installed script: ${BIN_DIR}/${base}"
 done
 
-# --- Install services --------------------------------------------------------
-say "Installing services (*.service) to ${UNIT_DIR}"
-for f in "${SRC_DIR}"/*.service; do
-  base="$(basename "$f")"
-  backup "${UNIT_DIR}/${base}"
-  install -Dm0644 "$f" "${UNIT_DIR}/${base}"
-  say "Installed service: ${UNIT_DIR}/${base}"
-done
-
 # --- 4) systemd: daemon-reload + enable services -----------------------------
 say "Reloading systemd units"
 systemctl daemon-reload
