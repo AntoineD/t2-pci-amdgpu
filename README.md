@@ -12,17 +12,13 @@ Should also work on other Mac Intel T2 models with AMD GPUs.
 
 The fix operates in five layers, from earliest to latest in the boot sequence:
 
-| Layer | What | When |
-|---|---|---|
-| **ACPI override** | Injects `_PR3`/`_DSM` stubs into the GPU ACPI device | Early initrd (before kernel) |
-| **modprobe.d** | Sets `amdgpu.aspm=0`, blacklists `radeon` | Module load |
-| **udev rule** | Pins GPU PCI functions to `power/control=on` | Device bind (before driver) |
-| **Warmfix service** | PCI remove → rescan with retry + readiness check | systemd, before display manager |
-| **DM drop-in** | Ensures display manager starts only after warmfix | systemd ordering |
-
-Without the ACPI override, PCI errors appear at boot and GPU init is unreliable.
-Without the udev rule and modprobe options, runtime power management can cause the GPU to disappear.
-The warmfix service automatically retries once if the GPU does not appear within 20 seconds.
+| Layer | What | When | Why |
+|---|---|---|---|
+| **ACPI override** | Injects `_PR3`/`_DSM` stubs into the GPU ACPI device | Early initrd (before kernel) | Apple's ACPI tables omit the power-resource and device-specific methods the Linux AMDGPU driver expects; without them the PCI link comes up in an undefined state and the driver fails to initialize |
+| **modprobe.d** | Sets `amdgpu.aspm=0`, blacklists `radeon` | Module load | Persists the ASPM-off setting across rescue boots and initramfs rebuilds that bypass GRUB; blacklisting `radeon` prevents it from racing `amdgpu` and claiming the device first |
+| **udev rule** | Pins GPU PCI functions to `power/control=on` | Device bind (before driver) | PCIe runtime PM can suspend the GPU between the ACPI fix and the driver binding; pinning the power state to `on` closes that window |
+| **Warmfix service** | PCI remove → rescan with retry + readiness check | systemd, before display manager | Forcing the PCI bus to re-enumerate the GPU slot makes the kernel re-read its BARs and re-run PCI init cleanly; the retry handles the ~15 s corruption case where the first init attempt fails |
+| **DM drop-in** | Ensures display manager starts only after warmfix | systemd ordering | Without explicit ordering, GDM can race the warmfix and start against an uninitialised GPU, producing a black screen or failed compositor |
 
 ---
 
