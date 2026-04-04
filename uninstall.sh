@@ -14,10 +14,52 @@ warn() { printf "\033[1;33m[!]\033[0m %s\n" "$*"; }
 err()  { printf "\033[1;31m[✗]\033[0m %s\n" "$*" >&2; }
 
 remove_file() {
-  if [[ -e "$1" ]]; then
-    rm -f -- "$1"
-    say "Removed: $1"
+  [[ -e "$1" ]] || return 0
+  rm -f -- "$1"
+  say "Removed: $1"
+}
+
+# offer_restore FILE — find .bak.* backups and let the user pick one to restore
+offer_restore() {
+  local file="$1"
+  local backups=()
+  # Collect backups sorted newest-first
+  while IFS= read -r -d '' b; do
+    backups+=("$b")
+  done < <(find "$(dirname "$file")" -maxdepth 1 \
+    -name "$(basename "$file").bak.*" -print0 2>/dev/null | sort -z -r)
+
+  (( ${#backups[@]} )) || return 0
+
+  echo
+  say "Found ${#backups[@]} backup(s) for $file:"
+  local i
+  for i in "${!backups[@]}"; do
+    # Extract the YYYYMMDD-HHMMSS timestamp from the suffix
+    local ts="${backups[$i]##*.bak.}"
+    printf "  %d) %s\n" "$((i + 1))" "$ts"
+  done
+  printf "  0) Do not restore (delete the installed file only)\n"
+
+  local choice
+  while true; do
+    read -r -p "  Choose [0-${#backups[@]}]: " choice || { choice=0; break; }
+    [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 0 && choice <= ${#backups[@]} )) && break
+    warn "Invalid choice"
+  done
+
+  remove_file "$file"
+
+  if (( choice > 0 )); then
+    local selected="${backups[$((choice - 1))]}"
+    mv -- "$selected" "$file"
+    say "Restored: $file (from ${selected##*.bak.})"
   fi
+
+  # Clean up remaining backups
+  for b in "${backups[@]}"; do
+    [[ -e "$b" ]] && rm -f -- "$b" && say "Cleaned up backup: $b"
+  done
 }
 
 [[ $EUID -eq 0 ]] || { err "Run with sudo/root."; exit 1; }
@@ -50,7 +92,7 @@ if [[ -L "$dm_unit" ]]; then
 else
   drop_dir="/etc/systemd/system/display-manager.service.d"
 fi
-remove_file "${drop_dir}/10-amdgpu-warmfix.conf"
+offer_restore "${drop_dir}/10-amdgpu-warmfix.conf"
 # Remove the drop-in directory if empty
 rmdir -- "$drop_dir" 2>/dev/null && say "Removed empty dir: $drop_dir" || true
 
@@ -58,23 +100,23 @@ rmdir -- "$drop_dir" 2>/dev/null && say "Removed empty dir: $drop_dir" || true
 # 3) Remove service units
 # ---------------------------------------------------------------------------
 for f in amdgpu-warmfix.service t2fanrd.service applesmc-late.service; do
-  remove_file "/etc/systemd/system/$f"
+  offer_restore "/etc/systemd/system/$f"
 done
 
 # ---------------------------------------------------------------------------
 # 4) Remove scripts and binaries from /usr/local/bin/
 # ---------------------------------------------------------------------------
 for f in amdgpu-pci-reset-load.sh amdgpu-check.sh t2-gpu-status.sh t2fanrd; do
-  remove_file "/usr/local/bin/$f"
+  offer_restore "/usr/local/bin/$f"
 done
 
 # ---------------------------------------------------------------------------
 # 5) Remove system config files
 # ---------------------------------------------------------------------------
-remove_file "/etc/modprobe.d/amdgpu.conf"
-remove_file "/etc/udev/rules.d/99-amdgpu-t2.rules"
-remove_file "/etc/dracut.conf.d/10-amdgpu-warmfix.conf"
-remove_file "/etc/dracut.conf.d/20-amdgpu-t2-cmdline.conf"
+offer_restore "/etc/modprobe.d/amdgpu.conf"
+offer_restore "/etc/udev/rules.d/99-amdgpu-t2.rules"
+offer_restore "/etc/dracut.conf.d/10-amdgpu-warmfix.conf"
+offer_restore "/etc/dracut.conf.d/20-amdgpu-t2-cmdline.conf"
 
 # ---------------------------------------------------------------------------
 # 6) Optionally remove ACPI image and t2fanrd config
