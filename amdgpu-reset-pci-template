@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Stage 2: remove/rescan PCI functions
 # NOTE: install.sh will replace ADDR with the slot root (e.g., "03:00").
 #       The "0000:" domain prefix is kept literal here to stay stable across systems.

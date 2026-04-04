@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # t2-gpu-status.sh — quick status check for T2 GPU workaround - version 1.0
+set -euo pipefail
 
 echo "=== AMDGPU Warmfix Status ==="
 
