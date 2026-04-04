@@ -89,9 +89,20 @@ say "AMDGPU warmfix installation — source: ${SRC_DIR}"
 # ---------------------------------------------------------------------------
 # 1) ACPI override image
 # ---------------------------------------------------------------------------
-if [[ -f "$ACPI_IMG" ]]; then
+acpi_needs_update=1
+if [[ -f "$ACPI_IMG" && -f "${SRC_DIR}/GFXALT-multi.aml" ]]; then
+  # Rebuild only if the .aml source has changed since the image was built
+  if [[ "${SRC_DIR}/GFXALT-multi.aml" -ot "$ACPI_IMG" ]]; then
+    acpi_needs_update=0
+    say "ACPI override is up to date: $ACPI_IMG — skipping"
+  else
+    say "ACPI source is newer than image — rebuilding"
+  fi
+elif [[ -f "$ACPI_IMG" ]]; then
+  acpi_needs_update=0
   say "ACPI override already present: $ACPI_IMG — skipping"
-elif [[ -f "${SRC_DIR}/GFXALT-multi.aml" ]]; then
+fi
+if (( acpi_needs_update )) && [[ -f "${SRC_DIR}/GFXALT-multi.aml" ]]; then
   if (( DRY_RUN )); then
     say "Would build ACPI override image: $ACPI_IMG"
   else
@@ -103,7 +114,7 @@ elif [[ -f "${SRC_DIR}/GFXALT-multi.aml" ]]; then
     rm -rf "$tmpdir"
     say "Installed: $ACPI_IMG"
   fi
-else
+elif (( acpi_needs_update )); then
   warn "GFXALT-multi.aml not found — ACPI override skipped (required for GPU fix)"
 fi
 
