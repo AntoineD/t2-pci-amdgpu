@@ -29,6 +29,7 @@ The fix operates in five layers, from earliest to latest in the boot sequence:
 | File | Description |
 |---|---|
 | `install.sh` | Main installer — runs all steps below |
+| `uninstall.sh` | Removes all installed files, disables services. Use `--all` to also remove `/boot/acpi_override.img` and `/etc/t2fanrd.conf`. |
 | `amdgpu-reset-pci-template` | Template for the PCI reset script; `ADDR` is replaced with the detected slot at install time |
 
 ### Systemd units
