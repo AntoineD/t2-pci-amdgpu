@@ -227,11 +227,12 @@ cat <<EOF
 ====== Action required: /etc/default/grub  (detected: ${boot_mode}) ======
 
   GRUB_EARLY_INITRD_LINUX_CUSTOM="acpi_override.img"
-  GRUB_CMDLINE_LINUX="pci=noaer pcie_aspm=off amdgpu.aspm=0"
+  GRUB_CMDLINE_LINUX="pci=noaer pcie_aspm=off amdgpu.aspm=0 amdgpu.runpm=0"
   (remove 'nomodeset' if present)
 
-Then regenerate:
+Then regenerate GRUB and initramfs:
   sudo grub2-mkconfig -o ${grub_cfg}
+  sudo dracut -f
 
 Reboot when ready.
 ======================================================================

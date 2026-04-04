@@ -99,7 +99,7 @@ GRUB_CMDLINE_LINUX="pci=noaer pcie_aspm=off amdgpu.aspm=0 amdgpu.runpm=0"
 
 Remove `nomodeset` from `GRUB_CMDLINE_LINUX` if present — it disables `amdgpu`.
 
-Then regenerate grub config:
+Then regenerate GRUB config and initramfs:
 
 ```bash
 # Legacy boot (iMac T2)
@@ -107,9 +107,12 @@ sudo grub2-mkconfig -o /boot/grub2/grub.cfg
 
 # EFI systems
 sudo grub2-mkconfig -o /boot/efi/EFI/fedora/grub.cfg
+
+# Rebuild initramfs (required for dracut config changes to take effect)
+sudo dracut -f
 ```
 
-The installer prints the correct command for your detected boot mode at the end of installation.
+The installer prints the correct commands for your detected boot mode at the end of installation.
 
 ---
 
