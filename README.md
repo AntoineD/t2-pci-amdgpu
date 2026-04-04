@@ -15,7 +15,7 @@ The fix operates in five layers, from earliest to latest in the boot sequence:
 | Layer | What | When | Why |
 |---|---|---|---|
 | **ACPI override** | Injects `_PR3`/`_DSM` stubs into the GPU ACPI device | Early initrd (before kernel) | Apple's ACPI tables omit the power-resource and device-specific methods the Linux AMDGPU driver expects; without them the PCI link comes up in an undefined state and the driver fails to initialize |
-| **modprobe.d** | Sets `amdgpu.aspm=0`, blacklists `radeon` | Module load | Persists the ASPM-off setting across rescue boots and initramfs rebuilds that bypass GRUB; blacklisting `radeon` prevents it from racing `amdgpu` and claiming the device first |
+| **modprobe.d** | Sets `amdgpu.aspm=0`, `amdgpu.runpm=0`, blacklists `radeon` | Module load | Persists ASPM-off and disables runtime power management so the GPU cannot be powered down after the driver claims it; blacklisting `radeon` prevents it from racing `amdgpu` |
 | **udev rule** | Pins GPU PCI functions to `power/control=on` | Device bind (before driver) | PCIe runtime PM can suspend the GPU between the ACPI fix and the driver binding; pinning the power state to `on` closes that window |
 | **Warmfix service** | PCI remove → rescan with retry + readiness check | systemd, before display manager | Forcing the PCI bus to re-enumerate the GPU slot makes the kernel re-read its BARs and re-run PCI init cleanly; the retry handles the ~15 s corruption case where the first init attempt fails |
 | **DM drop-in** | Ensures display manager starts only after warmfix | systemd ordering | Without explicit ordering, GDM can race the warmfix and start against an uninitialised GPU, producing a black screen or failed compositor |
@@ -51,7 +51,7 @@ The fix operates in five layers, from earliest to latest in the boot sequence:
 
 | File | Installed to | Description |
 |---|---|---|
-| `amdgpu.conf` | `/etc/modprobe.d/` | Sets `amdgpu.aspm=0` at module level; blacklists `radeon` |
+| `amdgpu.conf` | `/etc/modprobe.d/` | Sets `amdgpu.aspm=0` and `amdgpu.runpm=0` at module level; blacklists `radeon` |
 | `99-amdgpu-t2.rules` | `/etc/udev/rules.d/` | Pins AMD VGA and HDMI audio PCI functions to `power/control=on` at device bind |
 | `10-amdgpu-warmfix.conf` | `/etc/dracut.conf.d/` | Embeds `amdgpu`, `nvme`, `thunderbolt`, `pcieport` in initramfs |
 | `20-amdgpu-t2-cmdline.conf` | `/etc/dracut.conf.d/` | Embeds kernel params as initramfs fallback (used only when bootloader passes no cmdline) |
@@ -94,7 +94,7 @@ Edit `/etc/default/grub` and add or adjust:
 
 ```
 GRUB_EARLY_INITRD_LINUX_CUSTOM="acpi_override.img"
-GRUB_CMDLINE_LINUX="pci=noaer pcie_aspm=off amdgpu.aspm=0"
+GRUB_CMDLINE_LINUX="pci=noaer pcie_aspm=off amdgpu.aspm=0 amdgpu.runpm=0"
 ```
 
 Remove `nomodeset` from `GRUB_CMDLINE_LINUX` if present — it disables `amdgpu`.
