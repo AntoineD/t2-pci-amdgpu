@@ -119,6 +119,16 @@ if [[ -f "$template" ]]; then
   [[ -n "${gpu_bdf:-}" ]] || { err "AMD VGA device not found (lspci and sysfs both failed)."; exit 1; }
   slot="${gpu_bdf%.*}"   # e.g. 0000:03:00
   slot="${slot#????:}"   # strip domain prefix → 03:00
+  # Validate that both VGA (.0) and audio (.1) functions exist at this slot
+  vga_dev="/sys/bus/pci/devices/0000:${slot}.0"
+  aud_dev="/sys/bus/pci/devices/0000:${slot}.1"
+  if [[ ! -e "$vga_dev" ]]; then
+    err "VGA function not found at ${vga_dev}"; exit 1
+  fi
+  if [[ ! -e "$aud_dev" ]]; then
+    warn "HDMI audio function not found at ${aud_dev} — warmfix will skip audio removal"
+  fi
+  say "Validated PCI slot: VGA=${vga_dev} Audio=${aud_dev}"
   backup "$target"
   {
     cat <<'HDR'
