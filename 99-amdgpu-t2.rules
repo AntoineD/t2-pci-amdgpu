@@ -12,3 +12,8 @@ ACTION=="add", SUBSYSTEM=="pci", \
 ACTION=="add", SUBSYSTEM=="pci", \
   ATTR{vendor}=="0x1002", ATTR{class}=="0x040300", \
   ATTR{power/control}="on"
+
+# Pin AMD GPU dynamic power management to "low" to prevent thermal crashes.
+# See https://wiki.t2linux.org/guides/hybrid-graphics/
+SUBSYSTEM=="drm", DRIVERS=="amdgpu", \
+  ATTR{device/power_dpm_force_performance_level}="low"
