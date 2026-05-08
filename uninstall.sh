@@ -29,7 +29,7 @@ offer_restore() {
   done < <(find "$(dirname "$file")" -maxdepth 1 \
     -name "$(basename "$file").bak.*" -print0 2>/dev/null | sort -z -r)
 
-  (( ${#backups[@]} )) || return 0
+  (( ${#backups[@]} )) || { remove_file "$file"; return 0; }
 
   echo
   say "Found ${#backups[@]} backup(s) for $file:"
