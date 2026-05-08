@@ -12,8 +12,8 @@ else
 fi
 
 # GPU init count from dmesg
-count=$(dmesg | grep -c "amdgpu .*: .*resetting")
-inits=$(dmesg | grep -c "\[drm\] Initialized amdgpu")
+count=$(dmesg | grep -c "amdgpu .*: .*resetting" || true)
+inits=$(dmesg | grep -c "\[drm\] Initialized amdgpu" || true)
 total=$((count + inits))
 echo "GPU init events this boot: $total (resets=$count, successful inits=$inits)"
 
@@ -26,9 +26,9 @@ journalctl -b -t amdgpu-warmfix | tail -n 20
 echo
 echo "--- Services ---"
 for svc in amdgpu-warmfix.service applesmc-late.service t2fanrd.service; do
-    type=$(systemctl show -p Type --value "$svc" 2>/dev/null)
-    state=$(systemctl is-enabled "$svc" 2>/dev/null)
-    active=$(systemctl is-active "$svc" 2>/dev/null)
+    type=$(systemctl show -p Type --value "$svc" 2>/dev/null || true)
+    state=$(systemctl is-enabled "$svc" 2>/dev/null || true)
+    active=$(systemctl is-active "$svc" 2>/dev/null || true)
     if [[ "$type" == "oneshot" && "$active" == "inactive" ]]; then
         active="ran-once"
     fi
