@@ -1,0 +1,15 @@
+# /etc/udev/rules.d/99-t2-usb.rules
+# Pin USB root hubs to power/control=on.
+#
+# On Apple T2 Macs the xHCI root hubs autosuspend aggressively and can stop
+# reporting device attach events: plugging in a USB-to-Ethernet adapter (or
+# similar) yields no `new device` event in the kernel log until the hub is
+# manually woken with:
+#     echo on > /sys/bus/usb/devices/usbN/power/control
+#
+# Match Linux virtual root hubs (idVendor=0x1d6b, hub class 0x09) and pin
+# them on at bind time.  Downstream USB devices keep their own autosuspend.
+
+ACTION=="add", SUBSYSTEM=="usb", \
+  ATTR{idVendor}=="1d6b", ATTR{bDeviceClass}=="09", \
+  ATTR{power/control}="on"

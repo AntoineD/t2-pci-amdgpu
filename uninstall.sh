@@ -115,6 +115,7 @@ done
 # ---------------------------------------------------------------------------
 offer_restore "/etc/modprobe.d/amdgpu.conf"
 offer_restore "/etc/udev/rules.d/99-amdgpu-t2.rules"
+offer_restore "/etc/udev/rules.d/99-t2-usb.rules"
 offer_restore "/etc/dracut.conf.d/10-amdgpu-warmfix.conf"
 offer_restore "/etc/dracut.conf.d/20-amdgpu-t2-cmdline.conf"
 

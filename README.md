@@ -54,6 +54,7 @@ The fix operates in five layers, from earliest to latest in the boot sequence:
 |---|---|---|
 | `amdgpu.conf` | `/etc/modprobe.d/` | Sets `amdgpu.aspm=0` and `amdgpu.runpm=0` at module level; blacklists `radeon` |
 | `99-amdgpu-t2.rules` | `/etc/udev/rules.d/` | Pins AMD VGA and HDMI audio PCI functions to `power/control=on` at device bind; sets DPM to `low` |
+| `99-t2-usb.rules` | `/etc/udev/rules.d/` | Pins USB root hubs (`idVendor=1d6b`, hub class `09`) to `power/control=on`. T2 xHCI hubs autosuspend aggressively and stop reporting device attach events; pinning the root hubs awake fixes USB-to-Ethernet adapters and similar devices not appearing in `lsusb`. |
 | `10-amdgpu-warmfix.conf` | `/etc/dracut.conf.d/` | Embeds `amdgpu`, `nvme`, `thunderbolt`, `pcieport` in initramfs |
 | `20-amdgpu-t2-cmdline.conf` | `/etc/dracut.conf.d/` | Embeds kernel params as initramfs fallback (used only when bootloader passes no cmdline) |
 

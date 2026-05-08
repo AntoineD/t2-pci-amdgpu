@@ -16,7 +16,9 @@ The layers must execute in this order; each depends on the previous:
 
 2. **modprobe.d** (`amdgpu.conf`): Sets `amdgpu.aspm=0` and `amdgpu.runpm=0` at module level, blacklists `radeon`. Duplicates GRUB cmdline params intentionally — survives rescue boots that bypass GRUB.
 
-3. **udev rule** (`99-amdgpu-t2.rules`): Pins `power/control=on` for AMD VGA (class `0x030000`) and HDMI audio (class `0x040300`) at device bind, before the driver claims the device. Also pins DPM to `low` after the driver loads for thermal stability.
+3. **udev rules**:
+   - `99-amdgpu-t2.rules`: Pins `power/control=on` for AMD VGA (class `0x030000`) and HDMI audio (class `0x040300`) at device bind, before the driver claims the device. Also pins DPM to `low` after the driver loads for thermal stability.
+   - `99-t2-usb.rules`: Pins `power/control=on` for USB root hubs (`idVendor=0x1d6b`, hub class `0x09`). T2 xHCI hubs autosuspend aggressively and silently stop reporting device-attach events on suspended ports — symptom is plugged devices missing from `lsusb` with no kernel log entry.
 
 4. **Warmfix service** (`amdgpu-warmfix.service` → runs generated `amdgpu-pci-reset-load.sh`): Oneshot before display-manager. Removes GPU PCI functions (.1 audio first, then .0 VGA), rescans bus, waits up to 20s for `/dev/dri/renderD*`. Retries once on failure. Skips if `nomodeset` or `amdgpu.modeset=0` is on cmdline.
 
