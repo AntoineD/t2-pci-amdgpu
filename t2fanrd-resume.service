@@ -1,0 +1,24 @@
+# /etc/systemd/system/t2fanrd-resume.service
+#
+# The T2 SMC drops manual fan control across S3.  t2fanrd asserts the manual
+# bit (fan1_manual) only once, at startup, and thereafter only writes
+# fan1_output.  After a resume the SMC is back in automatic mode and ignores
+# those writes, so the fan ramps up and stays loud until the daemon is
+# restarted by hand.  This unit does that restart automatically.
+#
+# suspend.target is ordered After=systemd-suspend.service, so a unit that is
+# both WantedBy= and After= the sleep targets runs on the way back up, not on
+# the way down.
+[Unit]
+Description=Re-assert T2 manual fan control after resume
+Documentation=man:systemd.special(7)
+After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+
+[Service]
+Type=oneshot
+# try-restart is a no-op when t2fanrd is not running, so a deliberately
+# stopped daemon is not resurrected by a suspend cycle.
+ExecStart=/usr/bin/systemctl try-restart t2fanrd.service
+
+[Install]
+WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target

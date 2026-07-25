@@ -231,6 +231,7 @@ fi
 if ! (( DRY_RUN )); then systemctl daemon-reload; fi
 enable_service "amdgpu-warmfix.service"
 enable_service "t2fanrd.service"
+enable_service "t2fanrd-resume.service"
 enable_service "applesmc-late.service"
 
 # ---------------------------------------------------------------------------

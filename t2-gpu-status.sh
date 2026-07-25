@@ -20,17 +20,23 @@ echo "GPU init events this boot: $total (resets=$count, successful inits=$inits)
 # warmfix logs
 echo
 echo "--- Last boot warmfix log ---"
-journalctl -b -t amdgpu-warmfix | tail -n 20
+journalctl -b -u amdgpu-warmfix.service --no-pager | tail -n 20
 
 # service state
 echo
 echo "--- Services ---"
-for svc in amdgpu-warmfix.service applesmc-late.service t2fanrd.service; do
+for svc in amdgpu-warmfix.service applesmc-late.service t2fanrd.service t2fanrd-resume.service; do
     type=$(systemctl show -p Type --value "$svc" 2>/dev/null || true)
     state=$(systemctl is-enabled "$svc" 2>/dev/null || true)
     active=$(systemctl is-active "$svc" 2>/dev/null || true)
     if [[ "$type" == "oneshot" && "$active" == "inactive" ]]; then
-        active="ran-once"
+        # An empty start timestamp means the oneshot never ran this boot —
+        # normal for t2fanrd-resume until the first suspend/resume cycle.
+        if [[ -n "$(systemctl show -p ExecMainStartTimestamp --value "$svc" 2>/dev/null || true)" ]]; then
+            active="ran-once"
+        else
+            active="not-run"
+        fi
     fi
     printf "%-25s enabled=%-7s active=%s\n" "$svc" "$state" "$active"
 done

@@ -58,11 +58,16 @@ journalctl -b -u amdgpu-warmfix.service -n 15 --no-pager 2>/dev/null || \
 # --- Service states ----------------------------------------------------------
 echo
 say "Service states:"
-for svc in amdgpu-warmfix.service applesmc-late.service t2fanrd.service; do
+for svc in amdgpu-warmfix.service applesmc-late.service t2fanrd.service t2fanrd-resume.service; do
   enabled=$(systemctl is-enabled "$svc" 2>/dev/null || echo "not-found")
   active=$(systemctl  is-active  "$svc" 2>/dev/null || echo "not-found")
   type=$(systemctl show -p Type --value "$svc" 2>/dev/null || true)
-  [[ "$type" == "oneshot" && "$active" == "inactive" ]] && active="ran-once"
+  if [[ "$type" == "oneshot" && "$active" == "inactive" ]]; then
+    # Empty start timestamp = never ran this boot (expected for t2fanrd-resume
+    # until the machine has suspended once).
+    started=$(systemctl show -p ExecMainStartTimestamp --value "$svc" 2>/dev/null || true)
+    [[ -n "$started" ]] && active="ran-once" || active="not-run"
+  fi
   printf "  %-32s enabled=%-12s active=%s\n" "$svc" "$enabled" "$active"
 done
 

@@ -72,7 +72,7 @@ say "AMDGPU warmfix uninstallation"
 # ---------------------------------------------------------------------------
 # 1) Stop and disable services
 # ---------------------------------------------------------------------------
-for svc in amdgpu-warmfix.service t2fanrd.service applesmc-late.service; do
+for svc in amdgpu-warmfix.service t2fanrd-resume.service t2fanrd.service applesmc-late.service; do
   if systemctl is-enabled "$svc" &>/dev/null; then
     systemctl disable "$svc"
     say "Disabled: $svc"
@@ -99,7 +99,7 @@ rmdir -- "$drop_dir" 2>/dev/null && say "Removed empty dir: $drop_dir" || true
 # ---------------------------------------------------------------------------
 # 3) Remove service units
 # ---------------------------------------------------------------------------
-for f in amdgpu-warmfix.service t2fanrd.service applesmc-late.service; do
+for f in amdgpu-warmfix.service t2fanrd-resume.service t2fanrd.service applesmc-late.service; do
   offer_restore "/etc/systemd/system/$f"
 done
 
