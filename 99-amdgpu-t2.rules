@@ -8,7 +8,11 @@ ACTION=="add", SUBSYSTEM=="pci", \
   ATTR{vendor}=="0x1002", ATTR{class}=="0x030000", \
   ATTR{power/control}="on"
 
-# AMD HDMI audio function (PCI class 0x040300)
+# AMD HDMI audio function (PCI class 0x040300).
+# Best-effort only: snd_hda_intel calls pm_runtime_allow() from its async probe
+# work and resets this attribute to "auto" afterwards.  The rule still covers
+# the window before the driver binds; the durable fix is
+# `options snd_hda_intel power_save_controller=0` in /etc/modprobe.d/amdgpu.conf.
 ACTION=="add", SUBSYSTEM=="pci", \
   ATTR{vendor}=="0x1002", ATTR{class}=="0x040300", \
   ATTR{power/control}="on"
