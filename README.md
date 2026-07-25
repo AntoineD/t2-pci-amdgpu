@@ -101,14 +101,41 @@ Existing files are backed up as `<file>.bak.YYYYMMDD-HHMMSS` before replacement.
 
 ## GRUB configuration (required)
 
-Edit `/etc/default/grub` and add or adjust:
+`install.sh` reads your current `/etc/default/grub` and prints the exact lines to
+write, with your existing parameters preserved — follow that output rather than
+copying the generic form below.
+
+Two variables need to be right:
+
+**`GRUB_EARLY_INITRD_LINUX_CUSTOM`** must include `acpi_override.img`. If the
+variable is absent, add it:
 
 ```
 GRUB_EARLY_INITRD_LINUX_CUSTOM="acpi_override.img"
-GRUB_CMDLINE_LINUX="pci=noaer pcie_aspm=off amdgpu.aspm=0 amdgpu.runpm=0"
 ```
 
-Remove `nomodeset` from `GRUB_CMDLINE_LINUX` if present — it disables `amdgpu`.
+**`GRUB_CMDLINE_LINUX`** must contain all four parameters below. **Add them to
+whatever is already on that line — do not replace it**, or you will drop distro
+defaults such as `rhgb quiet`:
+
+```
+pci=noaer  pcie_aspm=off  amdgpu.aspm=0  amdgpu.runpm=0
+```
+
+So a line that starts as
+
+```
+GRUB_CMDLINE_LINUX="rhgb quiet pcie_aspm=off amdgpu.aspm=0"
+```
+
+becomes
+
+```
+GRUB_CMDLINE_LINUX="rhgb quiet pcie_aspm=off amdgpu.aspm=0 pci=noaer amdgpu.runpm=0"
+```
+
+Also remove `nomodeset` and `amdgpu.modeset=0` from that line if present — either
+one disables `amdgpu` entirely.
 
 Then regenerate GRUB config and initramfs:
 

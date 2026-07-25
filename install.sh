@@ -287,19 +287,92 @@ else
   boot_mode="Legacy BIOS"
 fi
 
+GRUB_FILE="${GRUB_FILE:-/etc/default/grub}"   # overridable for testing
+REQUIRED_PARAMS=(pci=noaer pcie_aspm=off amdgpu.aspm=0 amdgpu.runpm=0)
+
+# grub_var NAME — value of the last NAME= assignment in $GRUB_FILE, unquoted
+grub_var() {
+  local line
+  [[ -f "$GRUB_FILE" ]] || return 0
+  line="$(grep -E "^[[:space:]]*$1=" "$GRUB_FILE" 2>/dev/null | tail -n1)" || true
+  [[ -n "$line" ]] || return 0
+  line="${line#*=}"
+  line="${line%\"}"; line="${line#\"}"
+  line="${line%\'}"; line="${line#\'}"
+  printf '%s' "$line"
+}
+
+echo
+echo "====== Action required: ${GRUB_FILE}  (detected: ${boot_mode}) ======"
+echo
+
+if [[ ! -f "$GRUB_FILE" ]]; then
+  echo "1. Bootloader configuration"
+  warn "${GRUB_FILE} not found — set these by hand in your bootloader config:"
+  echo "    GRUB_EARLY_INITRD_LINUX_CUSTOM=\"acpi_override.img\""
+  echo "    GRUB_CMDLINE_LINUX=\"${REQUIRED_PARAMS[*]}\""
+else
+  echo "1. Edit ${GRUB_FILE} — two variables, described one at a time."
+  echo
+
+  # --- a) early initrd -------------------------------------------------------
+  cur_initrd="$(grub_var GRUB_EARLY_INITRD_LINUX_CUSTOM)"
+  echo "   a) GRUB_EARLY_INITRD_LINUX_CUSTOM — loads the ACPI override image"
+  if [[ "$cur_initrd" == *acpi_override.img* ]]; then
+    echo "      Already correct, nothing to do:"
+    echo "        GRUB_EARLY_INITRD_LINUX_CUSTOM=\"${cur_initrd}\""
+  elif [[ -n "$cur_initrd" ]]; then
+    echo "      Set to \"${cur_initrd}\" — append acpi_override.img, so the line becomes:"
+    echo
+    echo "        GRUB_EARLY_INITRD_LINUX_CUSTOM=\"${cur_initrd} acpi_override.img\""
+  else
+    echo "      Not set. Add this line:"
+    echo
+    echo "        GRUB_EARLY_INITRD_LINUX_CUSTOM=\"acpi_override.img\""
+  fi
+  echo
+
+  # --- b) kernel cmdline -----------------------------------------------------
+  cur_cmdline="$(grub_var GRUB_CMDLINE_LINUX)"
+  merged=()
+  had_nomodeset=0
+  for w in $cur_cmdline; do
+    if [[ "$w" == nomodeset || "$w" == amdgpu.modeset=0 ]]; then
+      had_nomodeset=1          # drop it: it disables the amdgpu driver entirely
+      continue
+    fi
+    merged+=("$w")
+  done
+  missing=()
+  for p in "${REQUIRED_PARAMS[@]}"; do
+    found=0
+    for w in "${merged[@]}"; do [[ "$w" == "$p" ]] && { found=1; break; }; done
+    (( found )) || { missing+=("$p"); merged+=("$p"); }
+  done
+
+  echo "   b) GRUB_CMDLINE_LINUX — kernel parameters"
+  if (( ${#missing[@]} == 0 && had_nomodeset == 0 )); then
+    echo "      Already correct, nothing to do."
+  else
+    (( ${#missing[@]} )) && \
+      echo "      Missing ${#missing[@]} parameter(s): ${missing[*]}"
+    (( had_nomodeset )) && \
+      warn "     nomodeset/amdgpu.modeset=0 is set — it disables amdgpu; removing it below"
+    echo "      Your existing parameters are kept. Replace the whole line with:"
+    echo
+    echo "        GRUB_CMDLINE_LINUX=\"${merged[*]}\""
+  fi
+fi
+
 cat <<EOF
 
-====== Action required: /etc/default/grub  (detected: ${boot_mode}) ======
+2. Regenerate the GRUB config and the initramfs:
 
-  GRUB_EARLY_INITRD_LINUX_CUSTOM="acpi_override.img"
-  GRUB_CMDLINE_LINUX="pci=noaer pcie_aspm=off amdgpu.aspm=0 amdgpu.runpm=0"
-  (remove 'nomodeset' if present)
+     sudo grub2-mkconfig -o ${grub_cfg}
+     sudo dracut -f
 
-Then regenerate GRUB and initramfs:
-  sudo grub2-mkconfig -o ${grub_cfg}
-  sudo dracut -f
+3. Reboot.
 
-Reboot when ready.
 ======================================================================
 
 EOF
