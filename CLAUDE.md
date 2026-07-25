@@ -89,7 +89,7 @@ unit's `modprobe` is normally a no-op. It is kept as insurance, not as the path.
 - `uninstall.sh` reverses the installation: stops/disables services, removes all installed files, cleans up DM drop-in. Use `--all` to also remove `/boot/acpi_override.img` and `/etc/t2fand.conf` (plus the legacy `/etc/t2fanrd.conf`).
 - `GFXALT-multi.aml` is the precompiled ACPI table. Recompile from `.dsl` with: `iasl -ve -tc GFXALT-multi.dsl`
 - `t2fanrd` is a prebuilt binary from [GnomedDev/T2FanRD](https://github.com/GnomedDev/T2FanRD), not built from source in this repo.
-- `10-amdgpu-warmfix.conf` uses `force_drivers` (not `add_drivers`) to guarantee early module loading in initramfs.
+- `10-amdgpu-warmfix.conf` uses `force_drivers` (not `add_drivers`) to guarantee early module loading in initramfs. Consequence: any name that does not resolve to a real `.ko` is a **fatal** `dracut -f` error, not a warning. `pcieport` was listed here and broke `dracut -f` outright — the PCIe port driver is compiled into the PCI core (`CONFIG_PCIEPORTBUS=y`), so it is neither a module nor a `modules.builtin` entry. Check any addition with `modinfo -n <name>` before committing it.
 
 ## Testing and verification
 
