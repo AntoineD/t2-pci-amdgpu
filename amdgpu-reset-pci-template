@@ -31,6 +31,23 @@ wait_for_gpu() {
   return 1
 }
 
+# The unit no longer orders itself after systemd-udev-settle.service (deprecated,
+# and a whole-queue barrier).  Wait for this GPU's own sysfs node instead — that
+# is the only precondition Stage 2 actually has.
+wait_for_pci_device() {
+  local dev="/sys/bus/pci/devices/0000:ADDR.0" i
+  for i in $(seq 1 20); do
+    [ -e "$dev" ] && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+if ! wait_for_pci_device; then
+  log "WARNING — /sys/bus/pci/devices/0000:ADDR.0 never appeared; skipping warmfix"
+  exit 0
+fi
+
 log "Stage 2: PCI remove/rescan (attempt 1)"
 pci_remove_rescan
 

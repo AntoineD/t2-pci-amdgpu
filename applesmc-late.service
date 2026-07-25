@@ -1,10 +1,14 @@
 [Unit]
 Description=Load applesmc after Apple T2 bridge is ready
+After=systemd-udevd.service
 
 [Service]
 Type=oneshot
 ExecStartPre=/usr/sbin/modprobe apple_bce
-ExecStartPre=/usr/bin/udevadm settle
+# Wait for the T2 bridge to actually bind, which is what "ready" means here —
+# not for the whole udev coldplug queue to drain.  Leading "-" keeps this
+# best-effort: on hardware without apple-bce the modprobe below still runs.
+ExecStartPre=-/usr/local/bin/t2-wait-sysfs.sh -t 15 '/sys/bus/pci/drivers/apple-bce/0000:*'
 ExecStart=/usr/sbin/modprobe applesmc
 
 [Install]

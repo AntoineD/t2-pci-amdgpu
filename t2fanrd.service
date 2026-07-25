@@ -1,14 +1,17 @@
 # /etc/systemd/system/t2fanrd.service
 [Unit]
 Description=T2 fan daemon
-After=systemd-modules-load.service systemd-udev-settle.service
-Wants=systemd-udev-settle.service
+After=systemd-modules-load.service applesmc-late.service
 
 [Service]
 Type=simple
 ExecStartPre=/usr/sbin/modprobe apple_bce
-ExecStartPre=/usr/bin/udevadm settle
 ExecStartPre=/usr/sbin/modprobe applesmc
+# Wait for the exact attribute t2fanrd opens, not for the whole udev queue.
+# On failure the unit fails and Restart=always retries in RestartSec.
+ExecStartPre=/usr/local/bin/t2-wait-sysfs.sh -t 15 \
+  '/sys/bus/acpi/devices/APP0001:*/fan1_manual' \
+  '/sys/devices/platform/applesmc.*/fan1_manual'
 # t2fanrd scans /sys automatically; no hardcoded path needed
 ExecStart=/usr/local/bin/t2fanrd --config /etc/t2fanrd.conf
 Restart=always

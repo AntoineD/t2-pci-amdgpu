@@ -110,7 +110,7 @@ done
 # ---------------------------------------------------------------------------
 # 4) Remove scripts and binaries from /usr/local/bin/
 # ---------------------------------------------------------------------------
-for f in amdgpu-pci-reset-load.sh amdgpu-check.sh t2-gpu-status.sh t2fanrd; do
+for f in amdgpu-pci-reset-load.sh amdgpu-check.sh t2-gpu-status.sh t2-wait-sysfs.sh t2fanrd; do
   offer_restore "/usr/local/bin/$f"
 done
 
