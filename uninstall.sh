@@ -56,9 +56,13 @@ offer_restore() {
     say "Restored: $file (from ${selected##*.bak.})"
   fi
 
-  # Clean up remaining backups
+  # Clean up remaining backups.  The restored one was moved away, so skip it —
+  # a bare `[[ -e ]] &&` here would end the loop body with status 1 and trip
+  # `set -e` whenever the user restored the last entry in the list.
   for b in "${backups[@]}"; do
-    [[ -e "$b" ]] && rm -f -- "$b" && say "Cleaned up backup: $b"
+    [[ -e "$b" ]] || continue
+    rm -f -- "$b"
+    say "Cleaned up backup: $b"
   done
 }
 
@@ -108,6 +112,16 @@ done
 # ---------------------------------------------------------------------------
 for f in amdgpu-pci-reset-load.sh amdgpu-check.sh t2-gpu-status.sh t2fanrd; do
   offer_restore "/usr/local/bin/$f"
+done
+
+# Installers before 2026-07 copied uninstall.sh here too.  Unlinking a running
+# script is safe on Linux — bash keeps reading from the open fd.
+if [[ "$(realpath -- "${BASH_SOURCE[0]}")" != "/usr/local/bin/uninstall.sh" ]]; then
+  remove_file "/usr/local/bin/uninstall.sh"
+fi
+for b in /usr/local/bin/uninstall.sh.bak.*; do
+  [[ -e "$b" ]] || continue   # no match: bash leaves the pattern literal
+  remove_file "$b"
 done
 
 # ---------------------------------------------------------------------------

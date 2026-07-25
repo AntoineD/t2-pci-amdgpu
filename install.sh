@@ -179,7 +179,8 @@ fi
 # ---------------------------------------------------------------------------
 say "Installing scripts to ${BIN_DIR}"
 for f in "${SRC_DIR}"/*.sh; do
-  [[ "$(basename "$f")" == "install.sh" ]] && continue
+  # The installer and uninstaller stay in the repo — they are not runtime tools.
+  case "$(basename "$f")" in install.sh|uninstall.sh) continue ;; esac
   install_file "$f" "${BIN_DIR}/$(basename "$f")" 0755
 done
 
