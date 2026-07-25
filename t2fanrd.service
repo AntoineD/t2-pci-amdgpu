@@ -13,9 +13,12 @@ ExecStartPre=/usr/sbin/modprobe applesmc
 ExecStart=/usr/local/bin/t2fanrd --config /etc/t2fanrd.conf
 Restart=always
 RestartSec=5
-# reset fan to auto mode when the service stops
-ExecStopPost=/usr/bin/bash -lc 'echo 0 >/sys/devices/*/APP0001:*/fan1_manual 2>/dev/null || true'
+# Hand the fan back to the SMC when the service stops, so a dead daemon never
+# leaves the machine pinned at a stale manual RPM.
+# The old glob (/sys/devices/*/APP0001:*/) never matched: applesmc sits several
+# levels deep under /sys/devices/LNXSYSTM:00/... and "*" spans one component
+# only.  /sys/bus/acpi/devices/ is a flat, stable view of the same device.
+ExecStopPost=/usr/bin/bash -c 'shopt -s nullglob; for f in /sys/bus/acpi/devices/APP0001:*/fan?_manual /sys/devices/platform/applesmc.*/fan?_manual; do echo 0 >"$f" || true; done; exit 0'
 
 [Install]
 WantedBy=multi-user.target
-
