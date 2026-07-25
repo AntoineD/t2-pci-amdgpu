@@ -3,7 +3,8 @@
 #
 # Usage: sudo ./uninstall.sh [--all]
 #
-#   --all   Also remove /boot/acpi_override.img and /etc/t2fanrd.conf
+#   --all   Also remove /boot/acpi_override.img and /etc/t2fand.conf
+#           (plus the legacy /etc/t2fanrd.conf, which t2fanrd never read)
 #
 set -Eeuo pipefail
 
@@ -138,9 +139,11 @@ offer_restore "/etc/dracut.conf.d/20-amdgpu-t2-cmdline.conf"
 # ---------------------------------------------------------------------------
 if (( REMOVE_ALL )); then
   remove_file "/boot/acpi_override.img"
+  remove_file "/etc/t2fand.conf"
+  # Written by installers before 2026-07; t2fanrd never read it.
   remove_file "/etc/t2fanrd.conf"
 else
-  warn "Kept /boot/acpi_override.img and /etc/t2fanrd.conf (use --all to remove)"
+  warn "Kept /boot/acpi_override.img and /etc/t2fand.conf (use --all to remove)"
 fi
 
 # ---------------------------------------------------------------------------

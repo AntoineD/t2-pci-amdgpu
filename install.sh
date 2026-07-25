@@ -203,27 +203,42 @@ if ! (( DRY_RUN )); then
 fi
 
 # ---------------------------------------------------------------------------
-# 6) Default t2fanrd config (skipped if already present — user may have tuned it)
+# 6) Default fan daemon config (skipped if already present — user may have tuned it)
+#
+# The path is NOT a choice: t2fanrd has /etc/t2fand.conf (no "r") compiled in
+# and ignores --config.  Earlier versions of this installer wrote
+# /etc/t2fanrd.conf, which the daemon never read — edits there did nothing.
+# The section header must be [Fan1], capital F: the daemon looks up "Fan{i}".
 # ---------------------------------------------------------------------------
+FAN_CONF="/etc/t2fand.conf"
 if [[ -f /etc/t2fanrd.conf ]]; then
-  say "t2fanrd config exists — skipping (delete to regenerate)"
+  warn "/etc/t2fanrd.conf exists but is never read by t2fanrd — safe to delete"
+fi
+if [[ -f "$FAN_CONF" ]]; then
+  say "Fan daemon config exists — skipping (delete to regenerate): $FAN_CONF"
 elif (( DRY_RUN )); then
-  say "Would create: /etc/t2fanrd.conf (default config)"
+  say "Would create: $FAN_CONF (default config)"
 else
-  cat > /etc/t2fanrd.conf <<'EOF'
-# /etc/t2fanrd.conf — T2 fan daemon configuration
+  cat > "$FAN_CONF" <<'EOF'
+# /etc/t2fand.conf — T2 fan daemon configuration
 # Adjust low_temp/high_temp (°C) to suit your hardware.
 # speed_curve: linear | exponential | logarithmic
 # always_full_speed: true | false
-
-[fan1]
-low_temp = 55
-high_temp = 85
-speed_curve = linear
-always_full_speed = false
+#
+# exponential is cubic: speed = min + (max-min) * ((T-low)/(high-low))^3
+# T is the CPU *package* temperature (coretemp temp1_input).
+#
+# Defaults tuned for iMac20,2 (i7-10700K).  That chip sits at 90-100 °C under
+# all-core load and the chassis cannot hold it lower at any RPM, so ending the
+# curve below ~90 just means max fan for every real workload.
+[Fan1]
+low_temp=60
+high_temp=90
+speed_curve=exponential
+always_full_speed=false
 EOF
-  chmod 0644 /etc/t2fanrd.conf
-  warn "Default /etc/t2fanrd.conf created — review thresholds for your hardware"
+  chmod 0644 "$FAN_CONF"
+  warn "Default $FAN_CONF created — review thresholds for your hardware"
 fi
 
 # ---------------------------------------------------------------------------

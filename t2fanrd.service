@@ -12,8 +12,11 @@ ExecStartPre=/usr/sbin/modprobe applesmc
 ExecStartPre=/usr/local/bin/t2-wait-sysfs.sh -t 15 \
   '/sys/bus/acpi/devices/APP0001:*/fan1_manual' \
   '/sys/devices/platform/applesmc.*/fan1_manual'
-# t2fanrd scans /sys automatically; no hardcoded path needed
-ExecStart=/usr/local/bin/t2fanrd --config /etc/t2fanrd.conf
+# t2fanrd scans /sys automatically; no hardcoded path needed.
+# No --config flag: the daemon has /etc/t2fand.conf (no "r") compiled in and
+# ignores the flag entirely.  Passing it only creates the illusion that some
+# other file is in use.
+ExecStart=/usr/local/bin/t2fanrd
 Restart=always
 RestartSec=5
 # Hand the fan back to the SMC when the service stops, so a dead daemon never
