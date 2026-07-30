@@ -5,8 +5,14 @@ After=systemd-modules-load.service applesmc-late.service
 
 [Service]
 Type=simple
-ExecStartPre=/usr/sbin/modprobe apple_bce
-ExecStartPre=/usr/sbin/modprobe applesmc
+# The T2 bridge module was renamed apple_bce -> t2bce_core in the 7.1 t2 kernel
+# (drivers/staging/t2bce).  Try both names, and keep both tolerant with "-":
+# a hard ExecStartPre failure fails the unit, Restart=always loops it forever,
+# and the SMC silently keeps driving the fan on its own much louder curve.
+# The real gate is the sysfs wait below, not these modprobes.
+ExecStartPre=-/usr/sbin/modprobe t2bce_core
+ExecStartPre=-/usr/sbin/modprobe apple_bce
+ExecStartPre=-/usr/sbin/modprobe applesmc
 # Wait for the exact attribute t2fanrd opens, not for the whole udev queue.
 # On failure the unit fails and Restart=always retries in RestartSec.
 ExecStartPre=/usr/local/bin/t2-wait-sysfs.sh -t 15 \

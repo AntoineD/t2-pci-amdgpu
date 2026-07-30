@@ -4,11 +4,14 @@ After=systemd-udevd.service
 
 [Service]
 Type=oneshot
-ExecStartPre=/usr/sbin/modprobe apple_bce
+# Renamed apple_bce -> t2bce_core in the 7.1 t2 kernel (drivers/staging/t2bce).
+# Try both, tolerant: a hard failure here fails the unit and takes applesmc with it.
+ExecStartPre=-/usr/sbin/modprobe t2bce_core
+ExecStartPre=-/usr/sbin/modprobe apple_bce
 # Wait for the T2 bridge to actually bind, which is what "ready" means here —
 # not for the whole udev coldplug queue to drain.  Leading "-" keeps this
-# best-effort: on hardware without apple-bce the modprobe below still runs.
-ExecStartPre=-/usr/local/bin/t2-wait-sysfs.sh -t 15 '/sys/bus/pci/drivers/apple-bce/0000:*'
+# best-effort: on hardware without the bridge the modprobe below still runs.
+ExecStartPre=-/usr/local/bin/t2-wait-sysfs.sh -t 15 '/sys/bus/pci/drivers/t2bce_core/0000:*' '/sys/bus/pci/drivers/apple-bce/0000:*'
 ExecStart=/usr/sbin/modprobe applesmc
 
 [Install]
