@@ -3,7 +3,47 @@
 # NOTE: install.sh will replace ADDR with the slot root (e.g., "03:00").
 #       The "0000:" domain prefix is kept literal here to stay stable across systems.
 
+GPU_VGA="/sys/bus/pci/devices/0000:ADDR.0"
+
+# True once really_probe() for the VGA function has reached a terminal state:
+#   DRM nodes published -> amdgpu_pci_probe() succeeded
+#   no `driver` symlink -> not bound (never started, or failed and unbound)
+# The symlink itself is NOT a completion signal: driver_sysfs_add() creates it
+# *before* really_probe() calls amdgpu_pci_probe(), so its presence only means
+# "probe started".  Waiting on it alone is what left this race open.
+amdgpu_probe_settled() {
+  local n
+  for n in "$GPU_VGA"/drm/card* "$GPU_VGA"/drm/renderD*; do
+    [ -e "$n" ] && return 0
+  done
+  [ -e "$GPU_VGA/driver" ] || return 0
+  return 1
+}
+
+# Never issue a PCI remove while amdgpu_pci_probe() is in flight.  The write to
+# `remove` blocks on the device lock the probe holds, then lands straight on the
+# failing probe's cleanup path: amdgpu_driver_release_kms ->
+# amdgpu_device_fini_sw -> vcn_v2_0_sw_fini tears down VCN sw state that the
+# probe unwind already freed.  Measured on iMac20,2: "Oops: 0002" then "note:
+# kworker/u64:2 exited with irqs disabled" — the boot wedges at the splash right
+# after this script logs "remove ... (vga)" and never reaches "rescanning PCI
+# bus".  The window is small (probe start to "[drm] Initialized amdgpu" is ~1.5s)
+# but it is squarely where this unit starts: 3 of 4 consecutive boots lost it.
+wait_amdgpu_settled() {
+  local i
+  [ -e "$GPU_VGA" ] || return 0
+  for i in $(seq 1 120); do
+    amdgpu_probe_settled && return 0
+    sleep 0.5
+  done
+  log "WARNING — amdgpu probe of $GPU_VGA still in flight after 60s; proceeding anyway"
+  return 0
+}
+
 pci_remove_rescan() {
+  # Also covers the retry below: the rescan above starts a fresh probe, and
+  # removing into *that* one crashes exactly the same way.
+  wait_amdgpu_settled
   for dev in /sys/bus/pci/devices/0000:ADDR.{1,0}; do
     if [ -e "$dev" ]; then
       if [[ "$dev" == *".1" ]]; then
@@ -33,18 +73,33 @@ wait_for_gpu() {
 
 # The unit no longer orders itself after systemd-udev-settle.service (deprecated,
 # and a whole-queue barrier).  Wait for this GPU's own sysfs node instead — that
-# is the only precondition Stage 2 actually has.
+# is the only precondition Stage 2 actually has.  The node appearing only means
+# the kernel enumerated the slot; waiting for amdgpu to be *done* with it is a
+# separate concern, handled by wait_amdgpu_settled above.
 wait_for_pci_device() {
-  local dev="/sys/bus/pci/devices/0000:ADDR.0" i
+  local i
   for i in $(seq 1 20); do
-    [ -e "$dev" ] && return 0
+    [ -e "$GPU_VGA" ] && return 0
     sleep 0.5
   done
   return 1
 }
 
 if ! wait_for_pci_device; then
-  log "WARNING — /sys/bus/pci/devices/0000:ADDR.0 never appeared; skipping warmfix"
+  log "WARNING — $GPU_VGA never appeared; skipping warmfix"
+  exit 0
+fi
+
+# Let any in-flight coldplug probe finish before deciding what to do.
+wait_amdgpu_settled
+
+# A cold probe that ran to completion needs no warmfix — remove/rescan on a
+# healthy GPU just re-inits it (~6s) and re-opens the race above for no gain.
+# The failure this unit exists to recover from is loud and detectable: SMU
+# handshake times out, amdgpu_device_ip_init fails -62, and no DRM node is ever
+# published.  Set AMDGPU_WARMFIX_ALWAYS_RESET=1 in the unit to reset regardless.
+if [ -z "${AMDGPU_WARMFIX_ALWAYS_RESET:-}" ] && ls /dev/dri/renderD* &>/dev/null; then
+  log "cold probe already succeeded: $(ls /dev/dri/renderD*) — skipping remove/rescan"
   exit 0
 fi
 

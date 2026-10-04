@@ -17,7 +17,7 @@ The fix operates in five layers, from earliest to latest in the boot sequence:
 | **ACPI override** | Injects `_PR3`/`_DSM` stubs into the GPU ACPI device | Early initrd (before kernel) | Apple's ACPI tables omit the power-resource and device-specific methods the Linux AMDGPU driver expects; without them the PCI link comes up in an undefined state and the driver fails to initialize |
 | **modprobe.d** | Sets `amdgpu.aspm=0`, `amdgpu.runpm=0`, `snd_hda_intel.power_save_controller=0`, blacklists `radeon` | Module load | Persists ASPM-off and disables runtime power management so neither GPU function can be powered down after its driver claims it; blacklisting `radeon` prevents it from racing `amdgpu` |
 | **udev rule** | Pins GPU PCI functions to `power/control=on`; sets DPM to `low` | Device bind / driver load | PCIe runtime PM can suspend the GPU between the ACPI fix and the driver binding; pinning the power state to `on` closes that window. DPM `low` prevents thermal crashes on T2 hardware. |
-| **Warmfix service** | PCI remove → rescan with retry + readiness check | systemd, before display manager | Forcing the PCI bus to re-enumerate the GPU slot makes the kernel re-read its BARs and re-run PCI init cleanly; the retry handles the ~15 s corruption case where the first init attempt fails |
+| **Warmfix service** | PCI remove → rescan with retry + readiness check; skipped when amdgpu's cold probe already succeeded | systemd, before display manager | Forcing the PCI bus to re-enumerate the GPU slot makes the kernel re-read its BARs and re-run PCI init cleanly; the retry handles the ~15 s corruption case where the first init attempt fails |
 | **DM drop-in** | Ensures display manager starts only after warmfix | systemd ordering | Without explicit ordering, GDM can race the warmfix and start against an uninitialised GPU, producing a black screen or failed compositor |
 
 ---
@@ -36,7 +36,7 @@ The fix operates in five layers, from earliest to latest in the boot sequence:
 
 | File | Installed to | Description |
 |---|---|---|
-| `amdgpu-warmfix.service` | `/etc/systemd/system/` | Runs the PCI reset at boot, before the display manager. Skips itself if `nomodeset` or `amdgpu.modeset=0` is set. |
+| `amdgpu-warmfix.service` | `/etc/systemd/system/` | Runs the PCI reset at boot, before the display manager, if amdgpu's cold probe failed. Skips itself if `nomodeset` or `amdgpu.modeset=0` is set. |
 | `t2fanrd.service` | `/etc/systemd/system/` | Runs the T2 fan daemon |
 | `t2fanrd-resume.service` | `/etc/systemd/system/` | Restarts `t2fanrd` after resume — the SMC drops manual fan control across S3, so without this the fan runs loud until the daemon is restarted by hand |
 | `applesmc-late.service` | `/etc/systemd/system/` | Loads `applesmc` once the `apple-bce` PCI driver has bound |
@@ -179,7 +179,12 @@ systemctl status amdgpu-warmfix.service --no-pager
 journalctl -u amdgpu-warmfix.service -b --no-pager
 ```
 
-Expected warmfix log lines (success path):
+When amdgpu's cold probe succeeded, no reset is needed and the warmfix logs one line:
+```
+[amdgpu-warmfix] cold probe already succeeded: /dev/dri/renderD128 — skipping remove/rescan
+```
+
+When the cold probe failed, the warmfix resets the GPU:
 ```
 [amdgpu-warmfix] Stage 2: PCI remove/rescan (attempt 1)
 [amdgpu-warmfix] remove 0000:03:00.1 (audio)
@@ -193,6 +198,14 @@ If the first attempt fails, the warmfix retries automatically:
 ```
 [amdgpu-warmfix] Stage 2: GPU not ready after first attempt — retrying
 [amdgpu-warmfix] Stage 2: GPU initialized on retry
+```
+
+To force the reset on every boot, even after a successful cold probe:
+```bash
+sudo systemctl edit amdgpu-warmfix.service
+# add:
+[Service]
+Environment=AMDGPU_WARMFIX_ALWAYS_RESET=1
 ```
 
 ---
