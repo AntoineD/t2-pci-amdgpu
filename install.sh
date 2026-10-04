@@ -9,15 +9,26 @@
 #   - modprobe.d, udev, dracut files → respective system dirs
 #   - Display manager drop-in        → warmfix runs before DM at boot
 #
-# Usage: sudo ./install.sh [--dry-run]
+# Usage: sudo ./install.sh [--dry-run] [--force-fan-conf]
 #
-#   --dry-run   Show what would be installed without making changes
+#   --dry-run          Show what would be installed without making changes
+#   --force-fan-conf   Overwrite /etc/t2fand.conf with the shipped default even
+#                      if its thresholds look hand-tuned
 #
 set -Eeuo pipefail
 shopt -s nullglob
 
 DRY_RUN=0
-[[ "${1:-}" == "--dry-run" ]] && { DRY_RUN=1; shift; }
+FORCE_FAN_CONF=0
+while (( $# )); do
+  case "$1" in
+    --dry-run)        DRY_RUN=1 ;;
+    --force-fan-conf) FORCE_FAN_CONF=1 ;;
+    # say/warn/err are not defined yet at this point in the file.
+    *) printf "\033[1;31m[✗]\033[0m Unknown option: %s\n" "$1" >&2; exit 1 ;;
+  esac
+  shift
+done
 
 [[ "${DEBUG:-0}" == "1" ]] && { PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '; set -x; }
 trap 'ec=$?; echo "[✗] FAILED at ${BASH_SOURCE##*/}:${LINENO} → ${BASH_COMMAND} (exit $ec)"; exit $ec' ERR
@@ -61,6 +72,34 @@ check_deps() {
     command -v "$cmd" &>/dev/null || missing+=("$cmd")
   done
   (( ${#missing[@]} == 0 )) || { err "Missing tools: ${missing[*]}"; exit 1; }
+}
+
+# fan_conf_get KEY FILE — read a "key=value" (or "key = value") from an ini file.
+# Prints the value, or nothing if the key is absent.
+fan_conf_get() {
+  sed -n -E "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*([^[:space:]#]+).*/\1/p" "$2" | head -1
+}
+
+write_fan_conf() {
+  cat > "$1" <<'EOF'
+# /etc/t2fand.conf — T2 fan daemon configuration
+# Adjust low_temp/high_temp (°C) to suit your hardware.
+# speed_curve: linear | exponential | logarithmic
+# always_full_speed: true | false
+#
+# exponential is cubic: speed = min + (max-min) * ((T-low)/(high-low))^3
+# T is the CPU *package* temperature (coretemp temp1_input).
+#
+# Defaults tuned for iMac20,2 (i7-10700K).  That chip sits at 90-100 °C under
+# all-core load and the chassis cannot hold it lower at any RPM, so ending the
+# curve below ~90 just means max fan for every real workload.
+[Fan1]
+low_temp=60
+high_temp=90
+speed_curve=exponential
+always_full_speed=false
+EOF
+  chmod 0644 "$1"
 }
 
 enable_service() {
@@ -203,42 +242,89 @@ if ! (( DRY_RUN )); then
 fi
 
 # ---------------------------------------------------------------------------
-# 6) Default fan daemon config (skipped if already present — user may have tuned it)
+# 6) Fan daemon config — created, or reconciled if an older one is in the way
 #
 # The path is NOT a choice: t2fanrd has /etc/t2fand.conf (no "r") compiled in
 # and ignores --config.  Earlier versions of this installer wrote
 # /etc/t2fanrd.conf, which the daemon never read — edits there did nothing.
 # The section header must be [Fan1], capital F: the daemon looks up "Fan{i}".
+#
+# This step used to skip outright whenever the file existed, on the theory that
+# the user may have tuned it.  That let a stale band shipped by an older
+# installer survive every subsequent re-run — the 55/75 band pins an i7-10700K
+# at max RPM from two busy threads, and no amount of re-installing fixed it.
+# So: repair a file that is structurally dead, migrate thresholds this project
+# is known to have shipped, and only leave genuinely hand-tuned values alone.
 # ---------------------------------------------------------------------------
 FAN_CONF="/etc/t2fand.conf"
+FAN_LOW_DEFAULT=60
+FAN_HIGH_DEFAULT=90
+# Bands previous versions of this installer wrote.  These are installer output,
+# not a user's decision, so they get migrated rather than preserved.
+FAN_LEGACY_BANDS=( "55/85" "55/75" )
+
 if [[ -f /etc/t2fanrd.conf ]]; then
   warn "/etc/t2fanrd.conf exists but is never read by t2fanrd — safe to delete"
 fi
-if [[ -f "$FAN_CONF" ]]; then
-  say "Fan daemon config exists — skipping (delete to regenerate): $FAN_CONF"
-elif (( DRY_RUN )); then
-  say "Would create: $FAN_CONF (default config)"
+
+if [[ ! -f "$FAN_CONF" ]]; then
+  if (( DRY_RUN )); then
+    say "Would create: $FAN_CONF (${FAN_LOW_DEFAULT}/${FAN_HIGH_DEFAULT})"
+  else
+    write_fan_conf "$FAN_CONF"
+    warn "Default $FAN_CONF created — review thresholds for your hardware"
+  fi
 else
-  cat > "$FAN_CONF" <<'EOF'
-# /etc/t2fand.conf — T2 fan daemon configuration
-# Adjust low_temp/high_temp (°C) to suit your hardware.
-# speed_curve: linear | exponential | logarithmic
-# always_full_speed: true | false
-#
-# exponential is cubic: speed = min + (max-min) * ((T-low)/(high-low))^3
-# T is the CPU *package* temperature (coretemp temp1_input).
-#
-# Defaults tuned for iMac20,2 (i7-10700K).  That chip sits at 90-100 °C under
-# all-core load and the chassis cannot hold it lower at any RPM, so ending the
-# curve below ~90 just means max fan for every real workload.
-[Fan1]
-low_temp=60
-high_temp=90
-speed_curve=exponential
-always_full_speed=false
-EOF
-  chmod 0644 "$FAN_CONF"
-  warn "Default $FAN_CONF created — review thresholds for your hardware"
+  fan_low="$(fan_conf_get low_temp  "$FAN_CONF")"
+  fan_high="$(fan_conf_get high_temp "$FAN_CONF")"
+  fan_band="${fan_low}/${fan_high}"
+  fan_default_band="${FAN_LOW_DEFAULT}/${FAN_HIGH_DEFAULT}"
+
+  # The daemon looks the section up as "Fan1".  A [fan1] header — which this
+  # installer shipped once — matches nothing, so the whole file is ignored and
+  # t2fanrd silently runs on its own built-in thresholds instead.
+  fan_header_ok=0
+  grep -qE '^[[:space:]]*\[Fan1\]' "$FAN_CONF" && fan_header_ok=1
+
+  fan_keys_ok=1
+  [[ -n "$fan_low" && -n "$fan_high" ]] || fan_keys_ok=0
+
+  fan_is_legacy=0
+  for b in "${FAN_LEGACY_BANDS[@]}"; do
+    [[ "$fan_band" == "$b" ]] && fan_is_legacy=1
+  done
+
+  if (( FORCE_FAN_CONF )); then
+    fan_action="rewrite";  fan_why="--force-fan-conf given"
+  elif (( ! fan_header_ok || ! fan_keys_ok )); then
+    # Nothing in the file is reaching the daemon, so there is no tuning to lose.
+    fan_action="rewrite";  fan_why="file is not readable by t2fanrd (bad [Fan1] header or missing thresholds)"
+  elif (( fan_is_legacy )); then
+    fan_action="rewrite";  fan_why="stale band $fan_band shipped by an older installer"
+  elif [[ "$fan_band" == "$fan_default_band" ]]; then
+    fan_action="keep";     fan_why="already at the shipped default ($fan_band)"
+  else
+    fan_action="tuned";    fan_why="thresholds $fan_band differ from the default $fan_default_band"
+  fi
+
+  case "$fan_action" in
+    rewrite)
+      if (( DRY_RUN )); then
+        say "Would rewrite $FAN_CONF to ${fan_default_band}: $fan_why"
+      else
+        backup "$FAN_CONF"
+        write_fan_conf "$FAN_CONF"
+        warn "Rewrote $FAN_CONF to ${fan_default_band} — $fan_why"
+      fi
+      ;;
+    keep)
+      say "Fan daemon config up to date: $fan_why"
+      ;;
+    tuned)
+      warn "Keeping hand-tuned $FAN_CONF — $fan_why"
+      warn "  Re-run with --force-fan-conf to reset it to the shipped default."
+      ;;
+  esac
 fi
 
 # ---------------------------------------------------------------------------

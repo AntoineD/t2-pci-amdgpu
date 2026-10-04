@@ -52,6 +52,35 @@ noise. Hence the 60/90 default.
 There is no smoothing, averaging or hysteresis — `calc_speed()` is a pure function
 of the instantaneous package temperature, which slews 47 → 86 °C in one second.
 
+`install.sh` **reconciles** an existing `/etc/t2fand.conf` rather than skipping it.
+Skipping is what let a 55/75 band survive every re-install for months. Bands this
+project has shipped (`55/75`, `55/85`, in `FAN_LEGACY_BANDS`) are backed up and
+rewritten; a file the daemon cannot parse (`[fan1]` header, missing thresholds) is
+rewritten because none of it was reaching the daemon anyway; anything else is
+treated as hand-tuning and only warned about, overridable with `--force-fan-conf`.
+Add any new shipped band to `FAN_LEGACY_BANDS` when changing the default, or the
+old value becomes sticky again.
+
+## Fan loud at idle — daemon dead, not curve wrong
+
+Distinguish the two loud-fan modes by whether RPM tracks the CPU at all. If RPM
+ramps while the package sits flat (measured: +551 RPM over 20 s at a constant
+40 °C), the daemon is not running and the SMC firmware curve is driving the fan
+off chassis/ambient sensors. A wrong curve, by contrast, still follows the CPU.
+
+Check `fan1_manual` (want `1`) and `NRestarts` (want `0`), not just
+`systemctl is-active` — `Restart=always` makes a hard-failing unit report
+`activating (auto-restart)` forever, and each cycle's `ExecStopPost` rewrites
+`fan1_manual=0`, so the restart loop actively re-hands the fan to the SMC every
+`RestartSec`. This is why every `ExecStartPre=` modprobe in `t2fanrd.service`
+carries a `-` prefix: the `apple_bce` → `t2bce_core` rename in the 7.1 t2 kernel
+turned one of them into a hard failure and silently cost fan control. The real
+start gate is the `t2-wait-sysfs.sh` precondition, not the modprobes.
+
+`fan1_max` reads **2700** while the SMC holds the fan and **3600** once the daemon
+asserts manual control. Read curve limits only with the daemon running — the
+SMC-controlled value will make the curve maths come out wrong.
+
 ## Fan control across suspend
 
 `t2fanrd` asserts the SMC manual-control bit (`fan1_manual`) once at startup and

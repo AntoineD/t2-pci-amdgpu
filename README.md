@@ -79,7 +79,9 @@ device a given unit needs is present. Each unit now waits on its own preconditio
 ## Install
 
 ```bash
-sudo ./install.sh
+sudo ./install.sh                     # install
+sudo ./install.sh --dry-run           # preview, change nothing
+sudo ./install.sh --force-fan-conf    # also reset a hand-tuned /etc/t2fand.conf
 ```
 
 The installer will:
@@ -89,7 +91,7 @@ The installer will:
 3. Auto-detect the AMD GPU PCI slot and generate `/usr/local/bin/amdgpu-pci-reset-load.sh`
 4. Install scripts and the `t2fanrd` binary to `/usr/local/bin/`
 5. Install `modprobe.d`, `udev`, and `dracut` config files
-6. Create a default `/etc/t2fand.conf` if none exists
+6. Create `/etc/t2fand.conf`, or reconcile an existing one (see below)
 7. Enable `amdgpu-warmfix`, `t2fanrd`, `t2fanrd-resume`, and `applesmc-late` services
 8. Create a display manager drop-in so the DM starts after warmfix
 
@@ -210,8 +212,30 @@ Run `sudo amdgpu-check.sh` — it will report the state of each layer and offer 
 The GPU is usually at a fixed slot (e.g. `0000:03:00.0` VGA, `0000:03:00.1` audio).
 Verify with `lspci -nn | grep VGA`. If the slot is wrong, edit `/usr/local/bin/amdgpu-pci-reset-load.sh` manually.
 
+**Fan loud and unrelated to CPU load** (ramps at idle, ignores a cool package):
+`t2fanrd` is not running, so the SMC is driving the fan on its own firmware
+curve — which follows chassis/ambient sensors, not the CPU package.
+
+```bash
+systemctl is-active t2fanrd.service                        # want: active
+systemctl show t2fanrd.service -p NRestarts --value        # want: 0
+cat /sys/bus/acpi/devices/APP0001:*/fan1_manual            # want: 1
+```
+
+`fan1_manual = 0` means the SMC owns the fan. A nonzero `NRestarts` that keeps
+climbing means the unit is in a restart loop: each failed start runs
+`ExecStopPost`, which hands the fan back to the SMC every `RestartSec`. Check
+why it fails with `journalctl -u t2fanrd -b`. The usual cause is an
+`ExecStartPre=` module load that no longer resolves — the T2 bridge was renamed
+`apple_bce` → `t2bce_core` in the 7.1 t2 kernel, and a stale unit file still
+naming `apple_bce` fails hard. Re-run `sudo ./install.sh` to refresh the unit.
+
+Note that `fan1_max` reads low (2700 rather than 3600 on iMac20,2) while the SMC
+holds control, so read the curve limits only with the daemon running.
+
 **Fans spinning at full speed:**
-`apple_bce` or T2 kernel patches not active. Check that `t2fanrd.service` is enabled and running, and that the T2Linux patched kernel is installed.
+T2 kernel patches not active — check the T2Linux patched kernel is installed and
+that `t2fanrd.service` is enabled and running.
 
 **Fan config edits have no effect:**
 `t2fanrd` reads **`/etc/t2fand.conf`** — no "r" — compiled in, and ignores
@@ -226,6 +250,19 @@ journalctl -u t2fanrd -n 30 --no-pager | grep -E 'low_temp|high_temp|speed_curve
 
 The daemon prints the config it actually parsed at startup — that grep is the
 only reliable confirmation an edit took.
+
+**How the installer treats an existing `/etc/t2fand.conf`:**
+
+| Existing file | Action |
+|---|---|
+| absent | created at `60/90` |
+| already `60/90` | left alone |
+| `55/75` or `55/85` — bands older versions of this installer shipped | backed up, rewritten to `60/90` |
+| `[fan1]` header, or `low_temp`/`high_temp` missing | backed up, rewritten — the daemon could not read the file, so there was no tuning to keep |
+| any other thresholds | kept, with a warning; use `--force-fan-conf` to reset |
+
+Earlier versions skipped the file whenever it existed, which let a stale band
+survive every re-install.
 
 **Fan too loud under light CPU load:**
 `speed_curve = exponential` is cubic over the CPU *package* temperature:
