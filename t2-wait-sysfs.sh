@@ -24,7 +24,9 @@ while :; do
   for pattern in "$@"; do
     # shellcheck disable=SC2206  # word splitting is the point: expand the glob
     matches=( $pattern )
-    if (( ${#matches[@]} )); then
+    # nullglob only drops words that contain glob characters: a literal path
+    # survives the expansion whether or not it exists, so test it.
+    if (( ${#matches[@]} )) && [[ -e ${matches[0]} ]]; then
       echo "${0##*/}: ready after ${SECONDS}s: ${matches[0]}"
       exit 0
     fi

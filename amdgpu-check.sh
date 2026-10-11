@@ -12,19 +12,34 @@ gpu_ok=1
 echo "=== AMDGPU T2 Health Check ==="
 echo
 
-# --- Render node -------------------------------------------------------------
-if ls /dev/dri/renderD* &>/dev/null 2>&1; then
-  ok  "Render node: $(ls /dev/dri/renderD* | tr '\n' ' ')"
+# --- AMD GPU DRM nodes ---------------------------------------------------------
+# Only nodes under an AMD VGA function count.  A global /dev/dri glob also sees
+# i915 (iGPU-enabled MacBookPros) or an eGPU, and would call a dead dGPU healthy.
+amd_nodes() {  # amd_nodes renderD|card — /dev/dri paths of AMD VGA DRM nodes
+  local d n ven cls
+  for d in /sys/bus/pci/devices/*; do
+    read -r ven 2>/dev/null < "$d/vendor" || continue
+    read -r cls 2>/dev/null < "$d/class"  || continue
+    [[ "$ven" == "0x1002" && "$cls" == 0x0300* ]] || continue
+    for n in "$d"/drm/"$1"*; do
+      [[ -e "$n" ]] && printf '/dev/dri/%s ' "${n##*/}"
+    done
+  done
+}
+
+render=$(amd_nodes renderD)
+if [[ -n "$render" ]]; then
+  ok  "Render node: $render"
 else
-  fail "Render node: missing"
+  fail "Render node: missing (none under an AMD VGA device)"
   gpu_ok=0
 fi
 
-# --- Card node ---------------------------------------------------------------
-if ls /dev/dri/card* &>/dev/null 2>&1; then
-  ok  "Card node:   $(ls /dev/dri/card* | tr '\n' ' ')"
+card=$(amd_nodes card)
+if [[ -n "$card" ]]; then
+  ok  "Card node:   $card"
 else
-  fail "Card node:   missing"
+  fail "Card node:   missing (none under an AMD VGA device)"
   gpu_ok=0
 fi
 
@@ -58,18 +73,7 @@ journalctl -b -u amdgpu-warmfix.service -n 15 --no-pager 2>/dev/null || \
 # --- Service states ----------------------------------------------------------
 echo
 say "Service states:"
-for svc in amdgpu-warmfix.service applesmc-late.service t2fanrd.service t2fanrd-resume.service; do
-  enabled=$(systemctl is-enabled "$svc" 2>/dev/null || echo "not-found")
-  active=$(systemctl  is-active  "$svc" 2>/dev/null || echo "not-found")
-  type=$(systemctl show -p Type --value "$svc" 2>/dev/null || true)
-  if [[ "$type" == "oneshot" && "$active" == "inactive" ]]; then
-    # Empty start timestamp = never ran this boot (expected for t2fanrd-resume
-    # until the machine has suspended once).
-    started=$(systemctl show -p ExecMainStartTimestamp --value "$svc" 2>/dev/null || true)
-    [[ -n "$started" ]] && active="ran-once" || active="not-run"
-  fi
-  printf "  %-32s enabled=%-12s active=%s\n" "$svc" "$enabled" "$active"
-done
+"$(dirname "${BASH_SOURCE[0]}")/t2-unit-state.sh" | sed 's/^/  /'
 
 # --- Power management state --------------------------------------------------
 echo
@@ -95,9 +99,12 @@ if (( gpu_ok == 0 )); then
     else
       say "Restarting amdgpu-warmfix.service ..."
       systemctl restart amdgpu-warmfix.service
-      sleep 3
-      say "/dev/dri/ after restart:"
-      ls /dev/dri/ 2>/dev/null || warn "Still empty"
+      render=$(amd_nodes renderD)
+      if [[ -n "$render" ]]; then
+        ok "AMD render node after restart: $render"
+      else
+        fail "Still no AMD render node — see: journalctl -b -u amdgpu-warmfix.service"
+      fi
     fi
   fi
 else

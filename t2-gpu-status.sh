@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 # t2-gpu-status.sh — quick status check for T2 GPU workaround - version 1.0
-set -euo pipefail
+set -Eeuo pipefail
 
 echo "=== AMDGPU Warmfix Status ==="
 
-# render node present ?
-if ls /dev/dri/renderD* >/dev/null 2>&1; then
-    echo "Render node: present ✔"
+# render node present ?  Only one under the AMD VGA function counts — a global
+# /dev/dri glob would also see i915 or an eGPU.
+render=""
+for d in /sys/bus/pci/devices/*; do
+    [[ "$(cat "$d/vendor" 2>/dev/null)" == "0x1002" && "$(cat "$d/class" 2>/dev/null)" == 0x0300* ]] || continue
+    for n in "$d"/drm/renderD*; do
+        [[ -e "$n" ]] && render+="/dev/dri/${n##*/} "
+    done
+done
+if [[ -n "$render" ]]; then
+    echo "Render node: present ✔ ($render)"
 else
     echo "Render node: missing ✘"
 fi
@@ -25,19 +33,4 @@ journalctl -b -u amdgpu-warmfix.service --no-pager | tail -n 20
 # service state
 echo
 echo "--- Services ---"
-for svc in amdgpu-warmfix.service applesmc-late.service t2fanrd.service t2fanrd-resume.service; do
-    type=$(systemctl show -p Type --value "$svc" 2>/dev/null || true)
-    state=$(systemctl is-enabled "$svc" 2>/dev/null || true)
-    active=$(systemctl is-active "$svc" 2>/dev/null || true)
-    if [[ "$type" == "oneshot" && "$active" == "inactive" ]]; then
-        # An empty start timestamp means the oneshot never ran this boot —
-        # normal for t2fanrd-resume until the first suspend/resume cycle.
-        if [[ -n "$(systemctl show -p ExecMainStartTimestamp --value "$svc" 2>/dev/null || true)" ]]; then
-            active="ran-once"
-        else
-            active="not-run"
-        fi
-    fi
-    printf "%-25s enabled=%-7s active=%s\n" "$svc" "$state" "$active"
-done
-
+"$(dirname "${BASH_SOURCE[0]}")/t2-unit-state.sh"

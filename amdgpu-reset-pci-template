@@ -5,19 +5,66 @@
 
 GPU_VGA="/sys/bus/pci/devices/0000:ADDR.0"
 
+# This GPU's own render node, as a /dev path.  Never glob /dev/dri/renderD*:
+# any other DRM driver (i915 on an iGPU-enabled MacBookPro, an eGPU) publishes
+# there too, and would pass for "amdgpu came up" while this GPU stays dead.
+gpu_render_node() {
+  local n
+  for n in "$GPU_VGA"/drm/renderD*; do
+    [ -e "$n" ] && { echo "/dev/dri/${n##*/}"; return 0; }
+  done
+  return 1
+}
+
+# True if amdgpu itself is loaded and past its module init, i.e. the initial
+# driver_register() probe of matching devices has run.  Built-in amdgpu has no
+# initstate file.  While this is false a coldplug `modprobe amdgpu` can still
+# be about to probe the device, so an unbound device proves nothing yet.
+amdgpu_module_live() {
+  [ -d /sys/module/amdgpu ] || return 1
+  [ -e /sys/module/amdgpu/initstate ] || return 0
+  [ "$(cat /sys/module/amdgpu/initstate)" = live ]
+}
+
+# True if the driver core has this device parked on its deferred-probe list.
+# On T2 Macs that is the normal state of the cold probe until apple_gmux binds:
+# amdgpu returns -EPROBE_DEFER from vga_switcheroo_client_probe_defer(), the
+# device is unbound, and the probe re-runs from deferred_probe_work_func once
+# gmux registers.  debugfs is the only place the list is visible; when it is
+# not readable, fall back to the one precondition we know of — a gmux in ACPI
+# (APP000B) whose driver is not live yet.
+amdgpu_probe_deferred() {
+  local f=/sys/kernel/debug/devices_deferred
+  if [ -r "$f" ]; then
+    grep -q "^${GPU_VGA##*/}[[:space:]]" "$f"
+    return
+  fi
+  ls -d /sys/bus/acpi/devices/APP000B:* &>/dev/null || return 1
+  [ "$(cat /sys/module/apple_gmux/initstate 2>/dev/null)" != live ]
+}
+
 # True once really_probe() for the VGA function has reached a terminal state:
-#   DRM nodes published -> amdgpu_pci_probe() succeeded
-#   no `driver` symlink -> not bound (never started, or failed and unbound)
+#   DRM nodes published -> amdgpu_pci_probe() succeeded (see the caveat below)
+#   no `driver` symlink, amdgpu live, not deferred -> failed and unbound, or
+#                          amdgpu will never claim it
 # The symlink itself is NOT a completion signal: driver_sysfs_add() creates it
 # *before* really_probe() calls amdgpu_pci_probe(), so its presence only means
-# "probe started".  Waiting on it alone is what left this race open.
+# "probe started".  Its absence is not one either: a probe that has not started
+# yet (module still loading, or deferred) looks exactly like one that failed.
+#
+# Caveat: the nodes appear at drm_dev_register(), which is not the end of
+# amdgpu_pci_probe() — xcp/kfd client/fbdev setup still follow and can fail,
+# and the device lock is held throughout.  Nothing in sysfs marks the true end,
+# so wait_amdgpu_settled() requires this to hold steadily before a remove.
 amdgpu_probe_settled() {
   local n
   for n in "$GPU_VGA"/drm/card* "$GPU_VGA"/drm/renderD*; do
     [ -e "$n" ] && return 0
   done
-  [ -e "$GPU_VGA/driver" ] || return 0
-  return 1
+  [ -e "$GPU_VGA/driver" ] && return 1
+  amdgpu_module_live || return 1
+  amdgpu_probe_deferred && return 1
+  return 0
 }
 
 # Never issue a PCI remove while amdgpu_pci_probe() is in flight.  The write to
@@ -41,17 +88,37 @@ amdgpu_probe_settled() {
 # timeout, return failure and let the caller skip the reset.  Probes normally
 # settle within ~4s (success or SMU timeout); once the kernel carries the
 # D (oops) taint, give up after 15s instead of 60s.
+#
+# "Settled" must hold for SETTLE_STABLE consecutive polls (~1.5s), not one.
+# That covers the gap the single-shot test cannot see: a deferred device sits
+# on neither list between deferred_probe_work_func() taking it off the active
+# list and driver_sysfs_add(); and a probe that fails after drm_dev_register()
+# unregisters its nodes on the way out, which breaks the streak.
+SETTLE_STABLE=4
 wait_amdgpu_settled() {
-  local i limit=120
+  local i limit=120 streak=0
   [ -e "$GPU_VGA" ] || return 0
   for i in $(seq 1 120); do
-    amdgpu_probe_settled && return 0
+    if amdgpu_probe_settled; then
+      streak=$(( streak + 1 ))
+      [ "$streak" -ge "$SETTLE_STABLE" ] && return 0
+    else
+      streak=0
+    fi
     if (( $(cat /proc/sys/kernel/tainted) & 128 )) && [ "$limit" -eq 120 ]; then
       limit=$(( i + 30 ))
     fi
     [ "$i" -ge "$limit" ] && break
     sleep 0.5
   done
+  if ! amdgpu_module_live; then
+    log "ERROR — amdgpu module not loaded after $(( i / 2 ))s; nothing for a reset to re-probe"
+    return 1
+  fi
+  if amdgpu_probe_deferred; then
+    log "ERROR — amdgpu probe of $GPU_VGA still deferred after $(( i / 2 ))s (apple_gmux not bound?)"
+    return 1
+  fi
   log "ERROR — amdgpu probe of $GPU_VGA never settled (after $(( i / 2 ))s)"
   if (( $(cat /proc/sys/kernel/tainted) & 128 )); then
     log "kernel is oops-tainted: probe worker likely died holding the device lock; check: journalctl -k -b | grep -B5 -A40 Oops"
@@ -80,10 +147,10 @@ pci_remove_rescan() {
 }
 
 wait_for_gpu() {
-  local max_wait=20
+  local i max_wait=20 node
   for i in $(seq 1 "$max_wait"); do
-    if ls /dev/dri/renderD* &>/dev/null; then
-      log "GPU ready after ${i}s: $(ls /dev/dri/renderD*)"
+    if node=$(gpu_render_node); then
+      log "GPU ready after ${i}s: $node"
       return 0
     fi
     sleep 1
@@ -91,37 +158,36 @@ wait_for_gpu() {
   return 1
 }
 
+# A cold probe that ran to completion needs no warmfix — remove/rescan on a
+# healthy GPU just re-inits it (~6s) and re-opens the race above for no gain.
+# The failure this unit exists to recover from is loud and detectable: SMU
+# handshake times out, amdgpu_device_ip_init fails -62, and no DRM node is ever
+# published.  Set AMDGPU_WARMFIX_ALWAYS_RESET=1 in the unit to reset regardless;
+# any other value (0, false, empty) leaves the skip on.
+skip_if_cold_probe_ok() {
+  local node
+  [ "${AMDGPU_WARMFIX_ALWAYS_RESET:-0}" = 1 ] && return 0
+  node=$(gpu_render_node) || return 0
+  log "cold probe already succeeded: $node — skipping remove/rescan"
+  exit 0
+}
+
 # The unit no longer orders itself after systemd-udev-settle.service (deprecated,
 # and a whole-queue barrier).  Wait for this GPU's own sysfs node instead — that
 # is the only precondition Stage 2 actually has.  The node appearing only means
 # the kernel enumerated the slot; waiting for amdgpu to be *done* with it is a
 # separate concern, handled by wait_amdgpu_settled above.
-wait_for_pci_device() {
-  local i
-  for i in $(seq 1 20); do
-    [ -e "$GPU_VGA" ] && return 0
-    sleep 0.5
-  done
-  return 1
-}
-
-if ! wait_for_pci_device; then
+if ! /usr/local/bin/t2-wait-sysfs.sh -t 10 "$GPU_VGA"; then
   log "WARNING — $GPU_VGA never appeared; skipping warmfix"
   exit 0
 fi
 
-# Let any in-flight coldplug probe finish before deciding what to do.
-wait_amdgpu_settled || exit 1
+# Already up: nothing to wait for and nothing to fix.
+skip_if_cold_probe_ok
 
-# A cold probe that ran to completion needs no warmfix — remove/rescan on a
-# healthy GPU just re-inits it (~6s) and re-opens the race above for no gain.
-# The failure this unit exists to recover from is loud and detectable: SMU
-# handshake times out, amdgpu_device_ip_init fails -62, and no DRM node is ever
-# published.  Set AMDGPU_WARMFIX_ALWAYS_RESET=1 in the unit to reset regardless.
-if [ -z "${AMDGPU_WARMFIX_ALWAYS_RESET:-}" ] && ls /dev/dri/renderD* &>/dev/null; then
-  log "cold probe already succeeded: $(ls /dev/dri/renderD*) — skipping remove/rescan"
-  exit 0
-fi
+# Let any in-flight or pending coldplug probe finish before deciding.
+wait_amdgpu_settled || exit 1
+skip_if_cold_probe_ok
 
 log "Stage 2: PCI remove/rescan (attempt 1)"
 pci_remove_rescan || exit 1

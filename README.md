@@ -142,17 +142,26 @@ one disables `amdgpu` entirely.
 Then regenerate GRUB config and initramfs:
 
 ```bash
-# Legacy boot (iMac T2)
+# Fedora 34+, EFI or legacy: /boot/grub2/grub.cfg is the real config.  On EFI,
+# /boot/efi/EFI/fedora/grub.cfg is a stub that hands off to it — do not
+# overwrite it with grub2-mkconfig.
 sudo grub2-mkconfig -o /boot/grub2/grub.cfg
-
-# EFI systems
-sudo grub2-mkconfig -o /boot/efi/EFI/fedora/grub.cfg
 
 # Rebuild initramfs (required for dracut config changes to take effect)
 sudo dracut -f
 ```
 
-The installer prints the correct commands for your detected boot mode at the end of installation.
+With BLS (`GRUB_ENABLE_BLSCFG=true`, Fedora's default) each kernel's command line
+lives in its own `/boot/loader/entries/*.conf`, and `grub2-mkconfig` does not
+rewrite them — editing `GRUB_CMDLINE_LINUX` alone never reaches the kernel.
+Apply the parameters with grubby, which also updates `/etc/default/grub`:
+
+```bash
+sudo grubby --update-kernel=ALL --args="pci=noaer pcie_aspm=off amdgpu.aspm=0 amdgpu.runpm=0"
+sudo grubby --update-kernel=ALL --remove-args="nomodeset amdgpu.modeset=0"
+```
+
+The installer prints the right commands for your system at the end of installation.
 
 ---
 
@@ -208,6 +217,12 @@ sudo systemctl edit amdgpu-warmfix.service
 Environment=AMDGPU_WARMFIX_ALWAYS_RESET=1
 ```
 
+Only the value `1` enables it; to turn it off, set `0` or remove the drop-in.
+
+The warmfix checks the render node *under the AMD GPU's own PCI device*, not
+`/dev/dri/renderD*` — an iGPU (i915) or eGPU render node does not count as the
+AMD GPU having come up.
+
 ---
 
 ## Troubleshooting
@@ -243,8 +258,10 @@ why it fails with `journalctl -u t2fanrd -b`. The usual cause is an
 `apple_bce` → `t2bce_core` in the 7.1 t2 kernel, and a stale unit file still
 naming `apple_bce` fails hard. Re-run `sudo ./install.sh` to refresh the unit.
 
-Note that `fan1_max` reads low (2700 rather than 3600 on iMac20,2) while the SMC
-holds control, so read the curve limits only with the daemon running.
+`t2fanrd` logs the limits it parsed at startup (`min_speed`, `max_speed`) — read
+them there (`journalctl -u t2fanrd -b`) rather than assuming a figure. On
+iMac20,2 under the 7.2 t2 kernels, every daemon start since 2026-08-25 logged
+`max_speed: 2700`, and `fan1_max` reads 2700 with `fan1_manual = 1`.
 
 **Fans spinning at full speed:**
 T2 kernel patches not active — check the T2Linux patched kernel is installed and
@@ -281,7 +298,8 @@ survive every re-install.
 `speed_curve = exponential` is cubic over the CPU *package* temperature:
 `speed = min + (max-min)·((T-low)/(high-low))³`. With a narrow band the fan
 saturates almost immediately — on iMac20,2 with `low=55 high=75`, one busy
-thread gave 2673 RPM and two gave the full 3600. Widen the band; `low_temp=60`,
+thread gave 2673 RPM and two gave full speed (measured 2026-07, when the
+daemon's `max_speed` was 3600 — it has read 2700 since 2026-08). Widen the band; `low_temp=60`,
 `high_temp=90` is the shipped default. At full load the package sits at 90-100 °C
 *regardless* of RPM, so a curve ending below ~90 °C costs noise and buys nothing.
 

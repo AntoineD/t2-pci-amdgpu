@@ -8,10 +8,16 @@ Type=oneshot
 # Try both, tolerant: a hard failure here fails the unit and takes applesmc with it.
 ExecStartPre=-/usr/sbin/modprobe t2bce_core
 ExecStartPre=-/usr/sbin/modprobe apple_bce
-# Wait for the T2 bridge to actually bind, which is what "ready" means here —
-# not for the whole udev coldplug queue to drain.  Leading "-" keeps this
-# best-effort: on hardware without the bridge the modprobe below still runs.
-ExecStartPre=-/usr/local/bin/t2-wait-sysfs.sh -t 15 '/sys/bus/pci/drivers/t2bce_core/0000:*' '/sys/bus/pci/drivers/apple-bce/0000:*'
+# Wait for the T2 bridge's probe to get somewhere, not for the whole udev
+# coldplug queue to drain.  The driver-dir link (drivers/<drv>/0000:*) is NOT
+# that signal: driver_sysfs_add() creates it before probe() runs, the same trap
+# the warmfix template documents for amdgpu.  For t2bce_core, wait instead for
+# the device link its probe adds when it registers the VHCI child (verified on
+# 7.2.8-310.t2).  The legacy apple-bce name keeps the weaker driver-link test —
+# no such kernel was available to find its equivalent.  Leading "-" keeps this
+# best-effort: on hardware without the bridge the modprobe below still runs,
+# and applesmc does not actually need the bridge (it autoloads from DMI).
+ExecStartPre=-/usr/local/bin/t2-wait-sysfs.sh -t 15 '/sys/bus/pci/drivers/t2bce_core/0000:*/consumer:t2bce_vhci:*' '/sys/bus/pci/drivers/apple-bce/0000:*'
 ExecStart=/usr/sbin/modprobe applesmc
 
 [Install]
