@@ -68,7 +68,7 @@ require_root() {
 
 check_deps() {
   local missing=()
-  for cmd in cpio gzip systemctl modprobe udevadm realpath install; do
+  for cmd in cpio systemctl modprobe udevadm realpath install; do
     command -v "$cmd" &>/dev/null || missing+=("$cmd")
   done
   (( ${#missing[@]} == 0 )) || { err "Missing tools: ${missing[*]}"; exit 1; }
@@ -128,8 +128,21 @@ say "AMDGPU warmfix installation — source: ${SRC_DIR}"
 # ---------------------------------------------------------------------------
 # 1) ACPI override image
 # ---------------------------------------------------------------------------
+# The image must be an UNCOMPRESSED cpio.  acpi_table_upgrade() scans the raw
+# initrd for kernel/firmware/acpi/*.aml before anything is decompressed, so a
+# compressed archive is silently skipped — no error, the SSDT just never loads.
+# Installers before 2026-10 gzipped it, and every boot ran without layer 1.
+# Such an image is rebuilt even when it is newer than the .aml.
+acpi_img_compressed() {
+  local magic
+  magic="$(od -A n -t x1 -N 2 "$1" 2>/dev/null | tr -d ' \n')"
+  [[ "$magic" == 1f8b ]]   # gzip; the newc cpio magic is "070701"
+}
+
 acpi_needs_update=1
-if [[ -f "$ACPI_IMG" && -f "${SRC_DIR}/GFXALT-multi.aml" ]]; then
+if [[ -f "$ACPI_IMG" ]] && acpi_img_compressed "$ACPI_IMG"; then
+  say "ACPI override $ACPI_IMG is gzip-compressed — the kernel never reads it; rebuilding"
+elif [[ -f "$ACPI_IMG" && -f "${SRC_DIR}/GFXALT-multi.aml" ]]; then
   # Rebuild only if the .aml source has changed since the image was built
   if [[ "${SRC_DIR}/GFXALT-multi.aml" -ot "$ACPI_IMG" ]]; then
     acpi_needs_update=0
@@ -149,7 +162,7 @@ if (( acpi_needs_update )) && [[ -f "${SRC_DIR}/GFXALT-multi.aml" ]]; then
     tmpdir="$(mktemp -d)"
     mkdir -p "$tmpdir/kernel/firmware/acpi"
     cp "${SRC_DIR}/GFXALT-multi.aml" "$tmpdir/kernel/firmware/acpi/"
-    ( cd "$tmpdir" && find kernel | cpio -H newc --quiet -o | gzip ) > "$ACPI_IMG"
+    ( cd "$tmpdir" && find kernel | cpio -H newc --quiet -o ) > "$ACPI_IMG"
     rm -rf "$tmpdir"
     say "Installed: $ACPI_IMG"
   fi

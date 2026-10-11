@@ -169,7 +169,7 @@ The installer prints the right commands for your system at the end of installati
 
 **1. ACPI override loaded:**
 ```bash
-dmesg | grep -i "ACPI: Early table override"
+sudo dmesg | grep -E "Table Upgrade|GFXALT"   # want: "ACPI: Table Upgrade: install [SSDT-    LH-  GFXALT]"
 ```
 
 **2. Kernel cmdline:**

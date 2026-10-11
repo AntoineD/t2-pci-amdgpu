@@ -12,7 +12,8 @@ Target hardware: iMac20,2 (i7-10700K + Navi10 / Radeon Pro 5700 XT). Should work
 
 The layers must execute in this order; each depends on the previous:
 
-1. **ACPI SSDT** (`GFXALT-multi.dsl` → `.aml`): Injects `_PR3`/`_DSM` stubs into GPU device across four possible ACPI paths (`PEG0/EGP0/EGP1`, `PEG0/PEGP`, `RP05.PEGP`, `RP21.PEGP`). Packed into `/boot/acpi_override.img` as an early initrd cpio. Uses `CondRefOf` to match the right path at boot.
+1. **ACPI SSDT** (`GFXALT-multi.dsl` → `.aml`): Injects `_PR3`/`_DSM` stubs into GPU device across four possible ACPI paths (`PEG0/EGP0/EGP1`, `PEG0/PEGP`, `RP05.PEGP`, `RP21.PEGP`). Packed into `/boot/acpi_override.img` as an early initrd cpio, loaded via `early_initrd=acpi_override.img` in `/boot/grub2/grubenv` (from `GRUB_EARLY_INITRD_LINUX_CUSTOM`). Uses `CondRefOf` to match the right path at boot.
+   The cpio **must be uncompressed**: `acpi_table_upgrade()` scans the raw initrd before decompression, so a gzipped archive is skipped without any error. Installers before 2026-10 gzipped it, and no journaled boot on iMac20,2 (2026-08-24 onward) ever loaded the table. Proof it loaded is an `ACPI: SSDT … (v02 LH GFXALT …)` line in `journalctl -k -b`. The old `dmesg | grep "Early table override"` check matched a message current kernels no longer print, so it could never confirm anything. `install.sh` rebuilds a gzip image (magic `1f8b`) even when it is newer than the `.aml`.
 
 2. **modprobe.d** (`amdgpu.conf`): Sets `amdgpu.aspm=0` and `amdgpu.runpm=0` at module level, blacklists `radeon`, and sets `snd_hda_intel.power_save_controller=0`. Duplicates GRUB cmdline params intentionally — survives rescue boots that bypass GRUB.
 
@@ -139,7 +140,7 @@ No automated test suite — this is a system-level boot fix tested on real hardw
 
 ```bash
 # Check ACPI override loaded
-dmesg | grep -i "ACPI: Early table override"
+sudo dmesg | grep -E "Table Upgrade|GFXALT"   # want: "ACPI: Table Upgrade: install [SSDT-    LH-  GFXALT]"
 
 # Check warmfix ran successfully
 sudo amdgpu-check.sh          # comprehensive health check
