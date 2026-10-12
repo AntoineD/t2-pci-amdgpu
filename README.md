@@ -4,7 +4,7 @@ Stabilizes AMD GPU initialization on Apple T2 iMac running Linux.
 Developed and tested on **iMac20,2** (i7-10700K + Navi10 / Radeon Pro 5700 XT).
 Should also work on other Mac Intel T2 models with AMD GPUs.
 
-**Tested on:** Fedora 43, Ubuntu
+**Tested on:** Fedora 43
 
 ---
 
@@ -13,7 +13,7 @@ Should also work on other Mac Intel T2 models with AMD GPUs.
 The fix operates in five layers, from earliest to latest in the boot sequence:
 
 | Layer | What | When | Why |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **ACPI override** | Injects `_PR3`/`_DSM` stubs into the GPU ACPI device | Early initrd (before kernel) | Apple's ACPI tables omit the power-resource and device-specific methods the Linux AMDGPU driver expects; without them the PCI link comes up in an undefined state and the driver fails to initialize |
 | **modprobe.d** | Sets `amdgpu.aspm=0`, `amdgpu.runpm=0`, `snd_hda_intel.power_save_controller=0`, blacklists `radeon` | Module load | Persists ASPM-off and disables runtime power management so neither GPU function can be powered down after its driver claims it; blacklisting `radeon` prevents it from racing `amdgpu` |
 | **udev rule** | Pins GPU PCI functions to `power/control=on`; sets DPM to `low` | Device bind / driver load | PCIe runtime PM can suspend the GPU between the ACPI fix and the driver binding; pinning the power state to `on` closes that window. DPM `low` prevents thermal crashes on T2 hardware. |
@@ -31,7 +31,7 @@ table, which takes ~9 s off every resume from suspend — see
 ### Installer
 
 | File | Description |
-|---|---|
+| --- | --- |
 | `install.sh` | Main installer — runs all steps below |
 | `uninstall.sh` | Removes all installed files, disables services. Use `--all` to also remove `/boot/acpi_override.img` and `/etc/t2fand.conf`. |
 | `amdgpu-reset-pci-template` | Template for the PCI reset script; `ADDR` is replaced with the detected slot at install time |
@@ -39,7 +39,7 @@ table, which takes ~9 s off every resume from suspend — see
 ### Systemd units
 
 | File | Installed to | Description |
-|---|---|---|
+| --- | --- | --- |
 | `amdgpu-warmfix.service` | `/etc/systemd/system/` | Runs the PCI reset at boot, before the display manager, if amdgpu's cold probe failed. Skips itself if `nomodeset` or `amdgpu.modeset=0` is set. |
 | `t2fanrd.service` | `/etc/systemd/system/` | Runs the T2 fan daemon |
 | `t2fanrd-resume.service` | `/etc/systemd/system/` | Restarts `t2fanrd` after resume — the SMC drops manual fan control across S3, so without this the fan runs loud until the daemon is restarted by hand |
@@ -55,7 +55,7 @@ device a given unit needs is present. Each unit now waits on its own preconditio
 ### Scripts and binaries
 
 | File | Installed to | Description |
-|---|---|---|
+| --- | --- | --- |
 | `amdgpu-check.sh` | `/usr/local/bin/` | GPU health check: render node, module state, installed kernels with the broken `imac5k_table` quirk, PCI power state, warmfix log. Offers live warmfix re-trigger if GPU is missing (requires root). |
 | `t2-gpu-status.sh` | `/usr/local/bin/` | Quick GPU and service status snapshot |
 | `t2-wait-sysfs.sh` | `/usr/local/bin/` | Blocks until a sysfs path matching any given glob appears. Used as `ExecStartPre=` in place of `udevadm settle` — waits for the one device the unit needs instead of the whole coldplug queue |
@@ -64,7 +64,7 @@ device a given unit needs is present. Each unit now waits on its own preconditio
 ### Config files
 
 | File | Installed to | Description |
-|---|---|---|
+| --- | --- | --- |
 | `amdgpu.conf` | `/etc/modprobe.d/` | Sets `amdgpu.aspm=0` and `amdgpu.runpm=0` at module level; blacklists `radeon`; sets `snd_hda_intel.power_save_controller=0` so the GPU's HDMI audio function stays out of runtime suspend |
 | `99-amdgpu-t2.rules` | `/etc/udev/rules.d/` | Pins the AMD VGA function to `power/control=on` at device bind; sets DPM to `low`. Also targets the HDMI audio function, but that write is best-effort — `snd_hda_intel` resets it to `auto` when it binds, which is why the module option above exists |
 | `99-t2-usb.rules` | `/etc/udev/rules.d/` | Pins USB root hubs (`idVendor=1d6b`, hub class `09`) to `power/control=on`. T2 xHCI hubs autosuspend aggressively and stop reporting device attach events; pinning the root hubs awake fixes USB-to-Ethernet adapters and similar devices not appearing in `lsusb`. |
@@ -76,7 +76,7 @@ device a given unit needs is present. Each unit now waits on its own preconditio
 ### ACPI
 
 | File | Description |
-|---|---|
+| --- | --- |
 | `GFXALT-multi.aml` | Compiled ACPI SSDT — packed into `/boot/acpi_override.img` by the installer |
 | `GFXALT-multi.dsl` | Source for the above. To recompile: `iasl -ve -tc GFXALT-multi.dsl` |
 | `t2-tbt-acpi-patch.py` | Run by the installer: reads Apple's `TbtOnPCH` SSDT from `/sys/firmware/acpi/tables`, patches two methods, and the result goes into the same image. No Apple code is shipped in this repo. |
@@ -177,6 +177,7 @@ The installer prints the right commands for your system at the end of installati
 ## Verification after reboot
 
 **1. ACPI override loaded:**
+
 ```bash
 journalctl -k -b | grep -E "Table Upgrade|GFXALT|TbtOnPCH"
 # want: ACPI: Table Upgrade: install [SSDT-    LH-  GFXALT]
@@ -188,27 +189,32 @@ Use the journal rather than `dmesg`: the kernel's 256 KB log buffer wraps, and
 after a few hours of uptime these early-boot lines are gone from it.
 
 **2. Kernel cmdline:**
+
 ```bash
 cat /proc/cmdline | grep acpi_override.img
 ```
 
 **3. Full GPU health check:**
+
 ```bash
 sudo amdgpu-check.sh
 ```
 
 Or manually:
+
 ```bash
 systemctl status amdgpu-warmfix.service --no-pager
 journalctl -u amdgpu-warmfix.service -b --no-pager
 ```
 
 When amdgpu's cold probe succeeded, no reset is needed and the warmfix logs one line:
+
 ```
 [amdgpu-warmfix] cold probe already succeeded: /dev/dri/renderD128 — skipping remove/rescan
 ```
 
 When the cold probe failed, the warmfix resets the GPU:
+
 ```
 [amdgpu-warmfix] Stage 2: PCI remove/rescan (attempt 1)
 [amdgpu-warmfix] remove 0000:03:00.1 (audio)
@@ -219,12 +225,14 @@ When the cold probe failed, the warmfix resets the GPU:
 ```
 
 If the first attempt fails, the warmfix retries automatically:
+
 ```
 [amdgpu-warmfix] Stage 2: GPU not ready after first attempt — retrying
 [amdgpu-warmfix] Stage 2: GPU initialized on retry
 ```
 
 To force the reset on every boot, even after a successful cold probe:
+
 ```bash
 sudo systemctl edit amdgpu-warmfix.service
 # add:
@@ -299,7 +307,7 @@ only reliable confirmation an edit took.
 **How the installer treats an existing `/etc/t2fand.conf`:**
 
 | Existing file | Action |
-|---|---|
+| --- | --- |
 | absent | created at `60/90` |
 | already `60/90` | left alone |
 | `55/75` or `55/85` — bands older versions of this installer shipped | backed up, rewritten to `60/90` |
@@ -331,6 +339,7 @@ cat /sys/bus/acpi/devices/APP0001:*/fan1_manual # expect: 1 while t2fanrd runs
 ```
 
 **Warmfix didn't run:**
+
 ```bash
 systemctl status amdgpu-warmfix.service
 # verify the drop-in exists:
@@ -348,7 +357,7 @@ per-device trace (`/sys/power/pm_print_times`) and an AML method trace put it
 in Apple's ACPI `_PS0` power-on methods:
 
 | Device | ACPI method | Time | What it waits for |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `07:00.0` Thunderbolt upstream port | `RP05.UPSB._PS0` | 5.39 s | Two `CRMW` calls: router register writes through the PCIe2CIO mailbox, 5 reads × 394 ms polling + 5 × 100 ms sleeps each |
 | `09:00.0` Thunderbolt NHI | `UPSB.DSB0.NHI0._PS0` | 2.47 s | One more `CRMW` (via `CTBT`) |
 | `0a:00.0` Thunderbolt xHCI | `UPSB.DSB2.XHC2._PS0` | 1.16 s | 1 s for DSB2's link-training bit to clear, then 150 ms |
@@ -366,6 +375,7 @@ The 9 s is pure timeout.
 
 **The fix.** `install.sh` patches Apple's `TbtOnPCH` table from the live firmware
 and loads it through `/boot/acpi_override.img`:
+
 - `CRMW` returns its failure value at once, the result it always produced.
 - XHC2's link wait gets a zero deadline. Its 150 ms settle delay stays.
 
@@ -382,9 +392,11 @@ Wi-Fi, `install.sh --disable-wifi` removes the port at boot instead, so its two
 chip without Apple's firmware anyway.
 
 **Measure a resume:**
+
 ```bash
 journalctl -k -b -o short-monotonic | grep -E "Waking up from system sleep|EC: interrupt unblocked|resume devices took|suspend exit"
 ```
+
 The gap between the first two lines is the noirq phase: 10.1 s before the fix.
 For a per-device breakdown, write `1` to `/sys/power/pm_print_times` (as root)
 before suspending; each device then logs `calling …` / `… returned 0 after N usecs`.
