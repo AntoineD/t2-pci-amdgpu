@@ -127,10 +127,15 @@ wait_amdgpu_settled() {
   return 1
 }
 
+# Callers must run wait_amdgpu_settled first.  It is not called here: on the
+# first attempt the main flow has just done it, and a second call restarts the
+# SETTLE_STABLE streak from zero for another ~1.5s of nothing.
+#
+# No sleep after each `remove`: the write returns only once
+# pci_stop_and_remove_bus_device() has unbound the driver and deleted the
+# device, so there is nothing left to wait for.  The 1s sleeps that used to
+# follow cost 2s of display-manager start on every boot that needed a reset.
 pci_remove_rescan() {
-  # Also covers the retry below: the rescan above starts a fresh probe, and
-  # removing into *that* one crashes exactly the same way.
-  wait_amdgpu_settled || return 1
   for dev in /sys/bus/pci/devices/0000:ADDR.{1,0}; do
     if [ -e "$dev" ]; then
       if [[ "$dev" == *".1" ]]; then
@@ -139,21 +144,27 @@ pci_remove_rescan() {
         log "remove $dev (vga)"
       fi
       echo 1 >"$dev/remove"
-      sleep 1
     fi
   done
   log "rescanning PCI bus"
+  # Keep digits only: bash formats EPOCHREALTIME with the locale's decimal
+  # point, which is a comma under e.g. LANG=fr_FR.UTF-8.
+  rescan_start_us=${EPOCHREALTIME//[!0-9]/}
   echo 1 >/sys/bus/pci/rescan
 }
 
+# Polls every 0.2s for up to 20s.  The `rescan` write itself blocks while the
+# new probe runs (~3.7s on iMac20,2), so the node is usually there on the first
+# poll; time is therefore reported from the start of the rescan, not the poll.
 wait_for_gpu() {
-  local i max_wait=20 node
-  for i in $(seq 1 "$max_wait"); do
+  local i node ms
+  for i in $(seq 0 100); do
     if node=$(gpu_render_node); then
-      log "GPU ready after ${i}s: $node"
+      ms=$(( (${EPOCHREALTIME//[!0-9]/} - rescan_start_us) / 1000 ))
+      log "GPU ready $(( ms / 1000 )).$(( ms % 1000 / 100 ))s after rescan: $node"
       return 0
     fi
-    sleep 1
+    sleep 0.2
   done
   return 1
 }
@@ -190,13 +201,16 @@ wait_amdgpu_settled || exit 1
 skip_if_cold_probe_ok
 
 log "Stage 2: PCI remove/rescan (attempt 1)"
-pci_remove_rescan || exit 1
+pci_remove_rescan
 
 if wait_for_gpu; then
   log "Stage 2: GPU initialized successfully"
 else
   log "Stage 2: GPU not ready after first attempt — retrying"
-  pci_remove_rescan || exit 1
+  # The rescan above started a fresh probe; removing into *that* one crashes
+  # exactly like removing into the cold one.
+  wait_amdgpu_settled || exit 1
+  pci_remove_rescan
   sleep 5
   if wait_for_gpu; then
     log "Stage 2: GPU initialized on retry"
