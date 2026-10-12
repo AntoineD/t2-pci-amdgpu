@@ -56,7 +56,7 @@ device a given unit needs is present. Each unit now waits on its own preconditio
 
 | File | Installed to | Description |
 |---|---|---|
-| `amdgpu-check.sh` | `/usr/local/bin/` | GPU health check: render node, module state, PCI power state, warmfix log. Offers live warmfix re-trigger if GPU is missing (requires root). |
+| `amdgpu-check.sh` | `/usr/local/bin/` | GPU health check: render node, module state, installed kernels with the broken `imac5k_table` quirk, PCI power state, warmfix log. Offers live warmfix re-trigger if GPU is missing (requires root). |
 | `t2-gpu-status.sh` | `/usr/local/bin/` | Quick GPU and service status snapshot |
 | `t2-wait-sysfs.sh` | `/usr/local/bin/` | Blocks until a sysfs path matching any given glob appears. Used as `ExecStartPre=` in place of `udevadm settle` — waits for the one device the unit needs instead of the whole coldplug queue |
 | `t2fanrd` | `/usr/local/bin/` | Prebuilt T2 fan controller daemon — [GnomedDev/T2FanRD](https://github.com/GnomedDev/T2FanRD) |

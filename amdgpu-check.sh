@@ -58,6 +58,55 @@ else
   ok  "radeon module: not loaded (good)"
 fi
 
+# --- Installed kernels with the broken imac5k_table quirk ---------------------
+# 7.2.9-310.t2 added an iMac20,x DMI quirk table, imac5k_table, without its {}
+# terminator: 0x2b0 bytes = 2 x 344-byte entries and no sentinel.  The amdgpu
+# probe reads past it, oopses and dies holding the device lock, and no
+# userspace step recovers that boot.  Flag such a kernel before it is booted.
+# Only 0x2b0 is known broken; any other size is reported but not judged.
+echo
+say "Installed kernels (amdgpu imac5k_table quirk):"
+imac5k_size() {  # imac5k_size <amdgpu.ko[.xz|.zst]> — hex size, empty if absent
+  local ko=$1 tmp
+  tmp=$(mktemp) || return 1
+  case "$ko" in
+    *.xz)  xz -dc "$ko"   >"$tmp" 2>/dev/null ;;
+    *.zst) zstd -dcq "$ko" >"$tmp" 2>/dev/null ;;
+    *)     cat "$ko"      >"$tmp" ;;
+  esac || { rm -f "$tmp"; return 1; }
+  nm -S "$tmp" 2>/dev/null | awk '$4 == "imac5k_table" { sub(/^0+/, "", $2); print $2 }'
+  rm -f "$tmp"
+}
+if ! command -v nm >/dev/null; then
+  warn "nm not found (binutils) — cannot inspect installed kernels"
+else
+  default_kver=""
+  if [[ $EUID -eq 0 ]] && command -v grubby >/dev/null; then
+    default_kver=$(grubby --default-kernel 2>/dev/null)
+    default_kver=${default_kver##*/vmlinuz-}
+  fi
+  for kdir in /lib/modules/*/; do
+    kver=${kdir%/}; kver=${kver##*/}
+    ko=$(compgen -G "${kdir}kernel/drivers/gpu/drm/amd/amdgpu/amdgpu.ko*" | head -n1)
+    [[ -n "$ko" ]] || continue
+    tags=""
+    [[ "$kver" == "$(uname -r)" ]] && tags+=" (running)"
+    [[ "$kver" == "$default_kver" ]] && tags+=" (GRUB default)"
+    if ! size=$(imac5k_size "$ko"); then
+      warn "$kver$tags: could not decompress $ko"
+    elif [[ -z "$size" ]]; then
+      ok  "$kver$tags: no imac5k_table"
+    elif [[ "$size" == "2b0" ]]; then
+      fail "$kver$tags: BROKEN imac5k_table (0x2b0, no terminator) — GPU probe oopses; do not boot it"
+      [[ "$kver" == "$default_kver" ]] && \
+        fail "  It is the GRUB default. Pick another: grubby --set-default /boot/vmlinuz-<good version>"
+    else
+      warn "$kver$tags: imac5k_table size 0x$size — not a known-broken size, unverified"
+    fi
+  done
+  [[ $EUID -eq 0 ]] || warn "Run as root to also check which kernel GRUB boots by default"
+fi
+
 # --- GPU init events from dmesg ----------------------------------------------
 resets=$(dmesg 2>/dev/null | grep -c "amdgpu .*resetting" || true)
 inits=$(dmesg  2>/dev/null | grep -c "\[drm\] Initialized amdgpu" || true)
