@@ -283,8 +283,9 @@ naming `apple_bce` fails hard. Re-run `sudo ./install.sh` to refresh the unit.
 
 `t2fanrd` logs the limits it parsed at startup (`min_speed`, `max_speed`) — read
 them there (`journalctl -u t2fanrd -b`) rather than assuming a figure. On
-iMac20,2 under the 7.2 t2 kernels, every daemon start since 2026-08-25 logged
-`max_speed: 2700`, and `fan1_max` reads 2700 with `fan1_manual = 1`.
+iMac20,2 under the 7.2 t2 kernels, cold-boot starts log `max_speed: 2700`,
+but some later restarts (after a resume, or by `install.sh`) have logged 3600.
+`fan1_max` reads whatever the running daemon logged.
 
 **Fans spinning at full speed:**
 T2 kernel patches not active — check the T2Linux patched kernel is installed and
@@ -322,7 +323,7 @@ survive every re-install.
 `speed = min + (max-min)·((T-low)/(high-low))³`. With a narrow band the fan
 saturates almost immediately — on iMac20,2 with `low=55 high=75`, one busy
 thread gave 2673 RPM and two gave full speed (measured 2026-07, when the
-daemon's `max_speed` was 3600 — it has read 2700 since 2026-08). Widen the band; `low_temp=60`,
+daemon's `max_speed` was 3600 — cold-boot starts have logged 2700 since 2026-08). Widen the band; `low_temp=60`,
 `high_temp=90` is the shipped default. At full load the package sits at 90-100 °C
 *regardless* of RPM, so a curve ending below ~90 °C costs noise and buys nothing.
 
@@ -394,10 +395,14 @@ chip without Apple's firmware anyway.
 **Measure a resume:**
 
 ```bash
-journalctl -k -b -o short-monotonic | grep -E "Waking up from system sleep|EC: interrupt unblocked|resume devices took|suspend exit"
+journalctl -k -b -o json | jq -r 'select(.MESSAGE|test("Waking up from system sleep|EC: interrupt unblocked|resume devices took|PM: suspend exit")) | "\((._SOURCE_MONOTONIC_TIMESTAMP|tonumber)/1e6) \(.MESSAGE)"'
 ```
 
-The gap between the first two lines is the noirq phase: 10.1 s before the fix.
+The gap between the first two lines is the noirq phase: 10.1 s before the fix,
+about 0.68 s after it. Use the kernel's timestamp as above, not
+`-o short-monotonic`: that shows when journald received each line, and the
+resume lines arrive in one burst, so the gap reads as almost zero. Right after
+a resume, `sudo dmesg` shows the kernel timestamps too.
 For a per-device breakdown, write `1` to `/sys/power/pm_print_times` (as root)
 before suspending; each device then logs `calling …` / `… returned 0 after N usecs`.
 

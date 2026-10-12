@@ -47,7 +47,7 @@ speed = min_speed + (max_speed - min_speed) * ((T - low_temp) / (high_temp - low
 ```
 
 Measured on iMac20,2, 2026-07 (min 1200 / max 3600 RPM — the daemon has
-reported `max_speed: 2700` on every start since 2026-08; see below): the formula predicts 2673 RPM at
+logged `max_speed: 2700` on every cold-boot start since 2026-08; see below): the formula predicts 2673 RPM at
 72 °C and the daemon wrote exactly 2673. With the old 55/75 band, **one** busy
 thread reached 2673 RPM and **two** pinned the fan at 3600. At 8-16 threads the
 package still sat at 93 °C mean / 100 °C peak *with the fan at 3600* — the chassis
@@ -83,11 +83,14 @@ turned one of them into a hard failure and silently cost fan control. The real
 start gate is the `t2-wait-sysfs.sh` precondition, not the modprobes.
 
 Read curve limits from the daemon's own startup log (`journalctl -u t2fanrd`,
-`min_speed`/`max_speed`), not from memory. On iMac20,2 with 7.2.x t2 kernels all
-149 starts logged since 2026-08-25 report `max_speed: 2700`, and `fan1_max`
-reads 2700 *with* `fan1_manual=1` — so an earlier note here claiming it reads
-3600 once the daemon holds the fan was wrong. The 3600 figures in the curve
-section above were measured 2026-07 and have not been seen since.
+`min_speed`/`max_speed`), not from memory. On iMac20,2 with 7.2.x t2 kernels,
+all 157 starts from 2026-08-25 to 2026-10-12 21:13 logged `max_speed: 2700`,
+post-resume restarts included. From the `install.sh` run at 2026-10-12 21:14 on,
+five starts logged 3600 instead — installer `try-restart`s and a
+`t2fanrd-resume` restart — and `fan1_max` then reads 3600 with `fan1_manual=1`;
+every cold-boot start still logs 2700. Cause unknown. So neither "always 2700"
+nor "3600 once the daemon holds the fan" holds. The 3600 figures in the curve
+section above were measured 2026-07.
 
 ## Fan control across suspend
 
@@ -187,8 +190,11 @@ No automated test suite — this is a system-level boot fix tested on real hardw
 journalctl -k -b | grep -E "Table Upgrade|GFXALT|TbtOnPCH"
 # want: "Table Upgrade: install [SSDT-    LH-  GFXALT]", "Table Upgrade: override [SSDT-APPLE-TbtOnPCH]"
 
-# Check resume speed: gap between these two lines was 10.1 s before the TbtOnPCH patch
-journalctl -k -b -o short-monotonic | grep -E "Waking up from system sleep|EC: interrupt unblocked"
+# Check resume speed: gap between these two lines was 10.1 s before the TbtOnPCH patch.
+# Use the kernel's own timestamp (_SOURCE_MONOTONIC_TIMESTAMP). `-o short-monotonic`
+# shows journald's receive time, and the resume lines all arrive in one burst
+# (measured: 0.01 ms receive gap vs 0.677 s real).
+journalctl -k -b -o json | jq -r 'select(.MESSAGE|test("Waking up from system sleep|EC: interrupt unblocked|PM: suspend exit")) | "\((._SOURCE_MONOTONIC_TIMESTAMP|tonumber)/1e6) \(.MESSAGE)"'
 
 # Check warmfix ran successfully
 sudo amdgpu-check.sh          # comprehensive health check
