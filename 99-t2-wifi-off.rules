@@ -1,0 +1,16 @@
+# /etc/udev/rules.d/99-t2-wifi-off.rules
+# Take the unused Broadcom Wi-Fi, and the root port above it, out of the PCI
+# tree.  Installed only by `install.sh --disable-wifi`.
+#
+# Apple's _PS3 and _PS0 for the Wi-Fi root port (\_SB.PCI0.RP01, child ARPT)
+# each wait up to 1 s for the PCIe link to drop or come back.  With no Wi-Fi
+# driver bound, both waits run out: 1 s on every suspend and 1 s on every
+# resume (iMac20,2, AML trace 2026-10-12).  The kernel calls them only for
+# devices it suspends, so a removed port skips both.  The hardware stays
+# powered as it already was with no driver.  Bluetooth is on the UART, not on
+# this port.
+#
+# Undo: delete this file, then `echo 1 | sudo tee /sys/bus/pci/rescan`.
+
+ACTION=="add", SUBSYSTEM=="pci", ATTR{firmware_node/path}=="*.ARPT", \
+  RUN+="/bin/sh -c '[ -w /sys%p/../remove ] && echo 1 > /sys%p/../remove'"

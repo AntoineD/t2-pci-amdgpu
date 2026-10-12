@@ -5,6 +5,7 @@
 #
 #   --all   Also remove /boot/acpi_override.img and /etc/t2fand.conf
 #           (plus the legacy /etc/t2fanrd.conf, which t2fanrd never read)
+#           and /var/lib/t2-pci-amdgpu
 #
 set -Eeuo pipefail
 
@@ -129,8 +130,10 @@ done
 # 5) Remove system config files
 # ---------------------------------------------------------------------------
 offer_restore "/etc/modprobe.d/amdgpu.conf"
+offer_restore "/etc/modprobe.d/t2-wifi-off.conf"
 offer_restore "/etc/udev/rules.d/99-amdgpu-t2.rules"
 offer_restore "/etc/udev/rules.d/99-t2-usb.rules"
+offer_restore "/etc/udev/rules.d/99-t2-wifi-off.rules"
 offer_restore "/etc/dracut.conf.d/10-amdgpu-warmfix.conf"
 offer_restore "/etc/dracut.conf.d/20-amdgpu-t2-cmdline.conf"
 
@@ -142,6 +145,12 @@ if (( REMOVE_ALL )); then
   remove_file "/etc/t2fand.conf"
   # Written by installers before 2026-07; t2fanrd never read it.
   remove_file "/etc/t2fanrd.conf"
+  # Firmware version the Thunderbolt patch was made on; meaningless without
+  # the image above.
+  if [[ -d /var/lib/t2-pci-amdgpu ]]; then
+    rm -rf -- /var/lib/t2-pci-amdgpu
+    say "Removed: /var/lib/t2-pci-amdgpu"
+  fi
 else
   warn "Kept /boot/acpi_override.img and /etc/t2fand.conf (use --all to remove)"
 fi

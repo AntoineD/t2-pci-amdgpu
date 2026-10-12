@@ -20,6 +20,10 @@ The fix operates in five layers, from earliest to latest in the boot sequence:
 | **Warmfix service** | PCI remove → rescan with retry + readiness check; skipped when amdgpu's cold probe already succeeded | systemd, before display manager | Forcing the PCI bus to re-enumerate the GPU slot makes the kernel re-read its BARs and re-run PCI init cleanly; the retry handles the ~15 s corruption case where the first init attempt fails |
 | **DM drop-in** | Ensures display manager starts only after warmfix | systemd ordering | Without explicit ordering, GDM can race the warmfix and start against an uninitialised GPU, producing a black screen or failed compositor |
 
+The same ACPI override image also carries a patched copy of Apple's Thunderbolt
+table, which takes ~9 s off every resume from suspend — see
+[Slow resume from suspend](#slow-resume-from-suspend).
+
 ---
 
 ## File overview
@@ -64,6 +68,8 @@ device a given unit needs is present. Each unit now waits on its own preconditio
 | `amdgpu.conf` | `/etc/modprobe.d/` | Sets `amdgpu.aspm=0` and `amdgpu.runpm=0` at module level; blacklists `radeon`; sets `snd_hda_intel.power_save_controller=0` so the GPU's HDMI audio function stays out of runtime suspend |
 | `99-amdgpu-t2.rules` | `/etc/udev/rules.d/` | Pins the AMD VGA function to `power/control=on` at device bind; sets DPM to `low`. Also targets the HDMI audio function, but that write is best-effort — `snd_hda_intel` resets it to `auto` when it binds, which is why the module option above exists |
 | `99-t2-usb.rules` | `/etc/udev/rules.d/` | Pins USB root hubs (`idVendor=1d6b`, hub class `09`) to `power/control=on`. T2 xHCI hubs autosuspend aggressively and stop reporting device attach events; pinning the root hubs awake fixes USB-to-Ethernet adapters and similar devices not appearing in `lsusb`. |
+| `99-t2-wifi-off.rules` | `/etc/udev/rules.d/` | Only with `install.sh --disable-wifi`. Removes the Wi-Fi (ACPI `ARPT`) and its root port from the PCI tree at boot, so Apple's 1 s link waits on that port no longer run on every suspend and resume. Bluetooth is unaffected — it is on the UART. |
+| `t2-wifi-off.conf` | `/etc/modprobe.d/` | Only with `install.sh --disable-wifi`. Blacklists `brcmfmac`, which without Apple's firmware files only fails its probe and logs a `__flush_work` warning every boot. |
 | `10-amdgpu-warmfix.conf` | `/etc/dracut.conf.d/` | Embeds `amdgpu`, `nvme` and `thunderbolt` in the initramfs via `force_drivers`. Every name must resolve to a real module — `force_drivers` makes a missing one a fatal `dracut -f` error |
 | `20-amdgpu-t2-cmdline.conf` | `/etc/dracut.conf.d/` | Embeds kernel params as initramfs fallback (used only when bootloader passes no cmdline) |
 
@@ -73,6 +79,7 @@ device a given unit needs is present. Each unit now waits on its own preconditio
 |---|---|
 | `GFXALT-multi.aml` | Compiled ACPI SSDT — packed into `/boot/acpi_override.img` by the installer |
 | `GFXALT-multi.dsl` | Source for the above. To recompile: `iasl -ve -tc GFXALT-multi.dsl` |
+| `t2-tbt-acpi-patch.py` | Run by the installer: reads Apple's `TbtOnPCH` SSDT from `/sys/firmware/acpi/tables`, patches two methods, and the result goes into the same image. No Apple code is shipped in this repo. |
 
 ---
 
@@ -82,11 +89,13 @@ device a given unit needs is present. Each unit now waits on its own preconditio
 sudo ./install.sh                     # install
 sudo ./install.sh --dry-run           # preview, change nothing
 sudo ./install.sh --force-fan-conf    # also reset a hand-tuned /etc/t2fand.conf
+sudo ./install.sh --disable-wifi      # also drop the unused Wi-Fi (faster suspend/resume)
 ```
 
 The installer will:
 
-1. Build `/boot/acpi_override.img` from `GFXALT-multi.aml`
+1. Build `/boot/acpi_override.img` from `GFXALT-multi.aml` and a patched copy of
+   Apple's `TbtOnPCH` table (rebuilt every run, replaced only if it changed)
 2. Install all `*.service` units to `/etc/systemd/system/`
 3. Auto-detect the AMD GPU PCI slot and generate `/usr/local/bin/amdgpu-pci-reset-load.sh`
 4. Install scripts and the `t2fanrd` binary to `/usr/local/bin/`
@@ -169,8 +178,14 @@ The installer prints the right commands for your system at the end of installati
 
 **1. ACPI override loaded:**
 ```bash
-sudo dmesg | grep -E "Table Upgrade|GFXALT"   # want: "ACPI: Table Upgrade: install [SSDT-    LH-  GFXALT]"
+journalctl -k -b | grep -E "Table Upgrade|GFXALT|TbtOnPCH"
+# want: ACPI: Table Upgrade: install [SSDT-    LH-  GFXALT]
+#       ACPI: Table Upgrade: override [SSDT-APPLE-TbtOnPCH]
+#       ACPI: SSDT ... (v02 APPLE  TbtOnPCH 00001001 INTL 20160930)
 ```
+
+Use the journal rather than `dmesg`: the kernel's 256 KB log buffer wraps, and
+after a few hours of uptime these early-boot lines are gone from it.
 
 **2. Kernel cmdline:**
 ```bash
@@ -321,6 +336,58 @@ systemctl status amdgpu-warmfix.service
 # verify the drop-in exists:
 ls /etc/systemd/system/gdm.service.d/10-amdgpu-warmfix.conf
 ```
+
+---
+
+## Slow resume from suspend
+
+On iMac20,2 every S3 resume used to stall for **10.1 s** before any device
+came back. It was the same on every kernel from 7.1.8 to 7.2.8 and on all 102
+resumes in the journal. The stall is in the kernel's noirq resume phase. A
+per-device trace (`/sys/power/pm_print_times`) and an AML method trace put it
+in Apple's ACPI `_PS0` power-on methods:
+
+| Device | ACPI method | Time | What it waits for |
+|---|---|---|---|
+| `07:00.0` Thunderbolt upstream port | `RP05.UPSB._PS0` | 5.39 s | Two `CRMW` calls: router register writes through the PCIe2CIO mailbox, 5 reads × 394 ms polling + 5 × 100 ms sleeps each |
+| `09:00.0` Thunderbolt NHI | `UPSB.DSB0.NHI0._PS0` | 2.47 s | One more `CRMW` (via `CTBT`) |
+| `0a:00.0` Thunderbolt xHCI | `UPSB.DSB2.XHC2._PS0` | 1.16 s | 1 s for DSB2's link-training bit to clear, then 150 ms |
+| `00:1c.0` Wi-Fi root port | `RP01._PS0` (and `_PS3` on suspend) | 1.01 s | 1 s for the Wi-Fi link to come up (go down, on suspend) |
+
+Each of these does its work only `If (OSDW ())`, which means "the OS is
+macOS". Linux answers `_OSI("Darwin")` on Apple hardware, so the firmware runs
+its macOS power sequencing on every wake. Under Linux the waits can never
+finish:
+
+- All 15 mailbox reads timed out, so `CRMW` never wrote anything.
+- XHC2 never saw the link-training bit clear, although the link is up.
+
+The 9 s is pure timeout.
+
+**The fix.** `install.sh` patches Apple's `TbtOnPCH` table from the live firmware
+and loads it through `/boot/acpi_override.img`:
+- `CRMW` returns its failure value at once, the result it always produced.
+- XHC2's link wait gets a zero deadline. Its 150 ms settle delay stays.
+
+Everything else in the table is untouched. That includes UPSB's 0.44 s link
+retrain, which does work and leaves the link at 8 GT/s x4. None of these
+devices runtime-suspend, so the methods run only on system resume.
+`t2-tbt-acpi-patch.py` refuses any table whose bytes it does not recognise.
+After a firmware update the installer leaves the patch out until a boot has
+shown the new table.
+
+For the Wi-Fi port there is nothing to patch short of the DSDT. If you do not use
+Wi-Fi, `install.sh --disable-wifi` removes the port at boot instead, so its two
+1 s waits go with it. It also blacklists `brcmfmac`, which could not drive the
+chip without Apple's firmware anyway.
+
+**Measure a resume:**
+```bash
+journalctl -k -b -o short-monotonic | grep -E "Waking up from system sleep|EC: interrupt unblocked|resume devices took|suspend exit"
+```
+The gap between the first two lines is the noirq phase: 10.1 s before the fix.
+For a per-device breakdown, write `1` to `/sys/power/pm_print_times` (as root)
+before suspending; each device then logs `calling …` / `… returned 0 after N usecs`.
 
 ---
 

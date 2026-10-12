@@ -104,6 +104,48 @@ uses `systemctl try-restart` so a deliberately stopped daemon is not resurrected
 `/sys/bus/acpi/devices/APP0001:*/` instead — flat and stable. A `*` glob spans
 one path component only, so `/sys/devices/*/APP0001:*/` never matches.
 
+## Slow S3 resume — Apple's macOS `_PS0` methods
+
+Every resume on iMac20,2 stalled 10.08–10.14 s in the noirq phase (102 resumes,
+kernels 7.1.8–7.2.8, with and without GFXALT). `pm_print_times` plus an AML
+method trace (`/sys/module/acpi/parameters/trace_state=enable`, layer `0x80`,
+level `0x10` — the default level floods the 256 KB printk buffer) put 10.02 s of
+it in four `_PS0` calls. Each one works only `If (OSDW ())`, and Linux answers
+`_OSI("Darwin")` on Apple hardware, so `OSDW` is true:
+- `RP05.UPSB._PS0` 5.39 s: two `CRMW` calls plus a 0.44 s link retrain that works.
+- `NHI0._PS0` 2.47 s: one `CRMW`, via `CTBT`.
+- `XHC2._PS0` 1.16 s: `PCED`'s 1 s DSB2 link wait plus 150 ms.
+- `RP01._PS0` 1.01 s: the Wi-Fi link wait in `LNKW`. `_PS3` costs another 1.01 s on suspend.
+
+`CRMW` reads through the UPSB PCIe2CIO mailbox (config `0x530`, the same layout
+as `PCIE2CIO_CMD` in the kernel's `icm.c`), and the mailbox never answers: 15 of
+15 `CIOR` timed out at 394 ms. Nothing was ever written. XHC2's wait never sees
+DSB2's training bit clear, although `lspci` shows DSB2 `LLActRep-` and the link
+up. `UGIO` took 0.4 ms, so the controller is already powered at resume. These
+devices never runtime-suspend (`runtime_suspended_time` 0), so the methods run
+only on system resume.
+
+There is no knob to keep a PCI device in D0 across S3 (`pm_qos_no_power_off` is
+not exposed for PCI). Hence `t2-tbt-acpi-patch.py`: it patches the *live*
+firmware table at install time. `CRMW` becomes `Return (One)`. XHC2 `PCED`'s
+second `Timer + 0x989680` becomes `+ 0`. The OEM revision goes from 0x1000 to
+0x1001, because the table upgrade needs a higher one.
+
+Once the override is active, `/sys/firmware/acpi/tables` shows the patched copy.
+The patcher passes that copy through unchanged. `install.sh` re-emits it only
+while `/sys/class/dmi/id/bios_version` matches `/var/lib/t2-pci-amdgpu/TbtOnPCH.bios`;
+after a firmware update it leaves the table out so a boot shows the new one.
+
+`--disable-wifi` installs `99-t2-wifi-off.rules`, which removes the `ARPT` parent
+port at boot instead of patching RP01 in the DSDT. It also installs
+`t2-wifi-off.conf` (blacklist `brcmfmac`): the driver otherwise probed before
+the rule ran, and again after the warmfix's bus rescan re-added the port, with
+a `__flush_work` WARN each time. The user of this repo does not use Wi-Fi, and
+brcmfmac never bound the BCM4364 (no Apple firmware files).
+
+The `pm_async=off` in `/proc/cmdline` comes from the t2 kernel's built-in
+`CONFIG_CMDLINE`, not GRUB. The `Command line:` boot log line does not show it.
+
 ## Unit ordering — no udev-settle
 
 No unit may order itself after `systemd-udev-settle.service`. It is deprecated,
@@ -126,7 +168,8 @@ unit's `modprobe` is normally a no-op. It is kept as insurance, not as the path.
 ## Key file relationships
 
 - `install.sh` reads `amdgpu-reset-pci-template` and substitutes `ADDR` with the auto-detected GPU PCI slot (e.g., `03:00`) to generate `/usr/local/bin/amdgpu-pci-reset-load.sh`. The template is not a standalone script — it's a fragment that `install.sh` wraps with a header. Supports `--dry-run` to preview actions without changes.
-- `uninstall.sh` reverses the installation: stops/disables services, removes all installed files, cleans up DM drop-in. Use `--all` to also remove `/boot/acpi_override.img` and `/etc/t2fand.conf` (plus the legacy `/etc/t2fanrd.conf`).
+- `uninstall.sh` reverses the installation: stops/disables services, removes all installed files, cleans up DM drop-in. Use `--all` to also remove `/boot/acpi_override.img` and `/etc/t2fand.conf` (plus the legacy `/etc/t2fanrd.conf`) and `/var/lib/t2-pci-amdgpu`.
+- `install.sh` rebuilds `/boot/acpi_override.img` on every run, with fixed mtimes and `cpio --reproducible`. It replaces the image only when `cmp` finds a difference. It holds `GFXALT-multi.aml` and, when `t2-tbt-acpi-patch.py` accepts the live table, `TbtOnPCH.aml`. The patcher is run with `python3`, never installed.
 - `t2-unit-state.sh` is the one copy of the unit list and the oneshot state logic; `amdgpu-check.sh` and `t2-gpu-status.sh` both call it from their own directory. It tells `ran-once` from `not-run` via the boot's journal (`Finished`/`Failed to start`), not `ExecMainStartTimestamp`: systemd unloads an inactive unit nothing references (`t2fanrd-resume` after every resume), and an unloaded unit reports an empty timestamp.
 - `install.sh` `try-restart`s `t2fanrd` at the end — the daemon reads its config and unit only at start, so a rewritten band otherwise changes nothing until reboot. Its "up to date" verdict compares `speed_curve` and `always_full_speed` too, not only the band.
 - `install.sh` GRUB guidance: on Fedora 34+ the real config is `/boot/grub2/grub.cfg` even on EFI (`/boot/efi/EFI/fedora/grub.cfg` is a `configfile` stub — never overwrite it). With `GRUB_ENABLE_BLSCFG=true`, `grub2-mkconfig` does not touch `/boot/loader/entries/*.conf`, so cmdline params go in with `grubby --update-kernel=ALL --args=...` (which also updates `/etc/default/grub`). fc43's grub2-mkconfig has no `--update-bls-cmdline`; the installer uses it only if `--help` lists it.
@@ -139,8 +182,12 @@ unit's `modprobe` is normally a no-op. It is kept as insurance, not as the path.
 No automated test suite — this is a system-level boot fix tested on real hardware. Verification after install + reboot:
 
 ```bash
-# Check ACPI override loaded
-sudo dmesg | grep -E "Table Upgrade|GFXALT"   # want: "ACPI: Table Upgrade: install [SSDT-    LH-  GFXALT]"
+# Check ACPI overrides loaded (journal, not dmesg: the printk buffer wraps)
+journalctl -k -b | grep -E "Table Upgrade|GFXALT|TbtOnPCH"
+# want: "Table Upgrade: install [SSDT-    LH-  GFXALT]", "Table Upgrade: override [SSDT-APPLE-TbtOnPCH]"
+
+# Check resume speed: gap between these two lines was 10.1 s before the TbtOnPCH patch
+journalctl -k -b -o short-monotonic | grep -E "Waking up from system sleep|EC: interrupt unblocked"
 
 # Check warmfix ran successfully
 sudo amdgpu-check.sh          # comprehensive health check

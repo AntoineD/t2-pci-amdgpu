@@ -2,28 +2,35 @@
 # install.sh — AMDGPU warmfix installer for Apple T2 iMac Intel
 #
 # Installs:
-#   - ACPI override image from GFXALT-multi.aml → /boot/acpi_override.img
+#   - ACPI override image            → /boot/acpi_override.img
+#       GFXALT-multi.aml, plus Apple's Thunderbolt SSDT patched for S3 resume
 #   - systemd service units          → /etc/systemd/system/
 #   - GPU PCI reset script           → /usr/local/bin/ (generated from template)
 #   - Helper scripts + t2fanrd       → /usr/local/bin/
 #   - modprobe.d, udev, dracut files → respective system dirs
 #   - Display manager drop-in        → warmfix runs before DM at boot
 #
-# Usage: sudo ./install.sh [--dry-run] [--force-fan-conf]
+# Usage: sudo ./install.sh [--dry-run] [--force-fan-conf] [--disable-wifi]
 #
 #   --dry-run          Show what would be installed without making changes
 #   --force-fan-conf   Overwrite /etc/t2fand.conf with the shipped default even
 #                      if its thresholds look hand-tuned
+#   --disable-wifi     Remove the Wi-Fi and its root port from the PCI tree at
+#                      boot (99-t2-wifi-off.rules) and blacklist brcmfmac
+#                      (t2-wifi-off.conf); saves 1 s on every suspend and 1 s
+#                      on every resume.  Only for machines that do not use Wi-Fi.
 #
 set -Eeuo pipefail
 shopt -s nullglob
 
 DRY_RUN=0
 FORCE_FAN_CONF=0
+DISABLE_WIFI=0
 while (( $# )); do
   case "$1" in
     --dry-run)        DRY_RUN=1 ;;
     --force-fan-conf) FORCE_FAN_CONF=1 ;;
+    --disable-wifi)   DISABLE_WIFI=1 ;;
     # say/warn/err are not defined yet at this point in the file.
     *) printf "\033[1;31m[✗]\033[0m Unknown option: %s\n" "$1" >&2; exit 1 ;;
   esac
@@ -119,6 +126,8 @@ BIN_DIR="/usr/local/bin"
 UNIT_DIR="/etc/systemd/system"
 DRACUT_DIR="/etc/dracut.conf.d"
 ACPI_IMG="/boot/acpi_override.img"
+STATE_DIR="/var/lib/t2-pci-amdgpu"
+TBT_BIOS_FILE="${STATE_DIR}/TbtOnPCH.bios"
 
 require_root
 check_deps
@@ -132,42 +141,105 @@ say "AMDGPU warmfix installation — source: ${SRC_DIR}"
 # initrd for kernel/firmware/acpi/*.aml before anything is decompressed, so a
 # compressed archive is silently skipped — no error, the SSDT just never loads.
 # Installers before 2026-10 gzipped it, and every boot ran without layer 1.
-# Such an image is rebuilt even when it is newer than the .aml.
+#
+# Two tables go in:
+#   GFXALT-multi.aml  new SSDT with the GPU's _PR3/_DSM stubs (layer 1)
+#   TbtOnPCH.aml      Apple's Thunderbolt SSDT with two resume waits that
+#                     always time out under Linux cut out — 9 s of every S3
+#                     resume on iMac20,2.  Generated from the live firmware
+#                     table by t2-tbt-acpi-patch.py, which documents both edits.
+#
+# The image is rebuilt on every run and replaced only when its bytes differ.
 acpi_img_compressed() {
   local magic
   magic="$(od -A n -t x1 -N 2 "$1" 2>/dev/null | tr -d ' \n')"
   [[ "$magic" == 1f8b ]]   # gzip; the newc cpio magic is "070701"
 }
 
-acpi_needs_update=1
-if [[ -f "$ACPI_IMG" ]] && acpi_img_compressed "$ACPI_IMG"; then
-  say "ACPI override $ACPI_IMG is gzip-compressed — the kernel never reads it; rebuilding"
-elif [[ -f "$ACPI_IMG" && -f "${SRC_DIR}/GFXALT-multi.aml" ]]; then
-  # Rebuild only if the .aml source has changed since the image was built
-  if [[ "${SRC_DIR}/GFXALT-multi.aml" -ot "$ACPI_IMG" ]]; then
-    acpi_needs_update=0
-    say "ACPI override is up to date: $ACPI_IMG — skipping"
-  else
-    say "ACPI source is newer than image — rebuilding"
+# acpi_table_by_id ID — path of the live SSDT whose OEM table ID (header bytes
+# 16-23) is ID.  Root only: /sys/firmware/acpi/tables/* are mode 0400.
+acpi_table_by_id() {
+  local t
+  for t in /sys/firmware/acpi/tables/SSDT*; do
+    if [[ "$(head -c 24 "$t" 2>/dev/null | tail -c 8 | tr -d '\0')" == "$1" ]]; then
+      printf '%s\n' "$t"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# tbt_table DIR — write Apple's TbtOnPCH, patched for resume, into DIR.
+# Returns 1, having said why, when it is left out.
+#
+# Once the override is active the live table IS the patched copy, which the
+# patcher passes through unchanged.  That copy was made from the firmware
+# recorded in TBT_BIOS_FILE.  After a firmware update it would replace a table
+# nobody has checked, so it is left out instead: the next boot then runs the
+# new firmware's own table, and the next install patches that one.
+tbt_table() {
+  local live out bios rec
+  if ! live="$(acpi_table_by_id TbtOnPCH)"; then
+    say "No Apple TbtOnPCH table on this Mac — Thunderbolt resume patch not needed"
+    return 1
   fi
-elif [[ -f "$ACPI_IMG" ]]; then
-  acpi_needs_update=0
-  say "ACPI override already present: $ACPI_IMG — skipping"
-fi
-if (( acpi_needs_update )) && [[ -f "${SRC_DIR}/GFXALT-multi.aml" ]]; then
-  if (( DRY_RUN )); then
-    say "Would build ACPI override image: $ACPI_IMG"
-  else
-    say "Building ACPI override image: $ACPI_IMG"
-    tmpdir="$(mktemp -d)"
-    mkdir -p "$tmpdir/kernel/firmware/acpi"
-    cp "${SRC_DIR}/GFXALT-multi.aml" "$tmpdir/kernel/firmware/acpi/"
-    ( cd "$tmpdir" && find kernel | cpio -H newc --quiet -o ) > "$ACPI_IMG"
-    rm -rf "$tmpdir"
-    say "Installed: $ACPI_IMG"
+  if ! command -v python3 &>/dev/null; then
+    warn "python3 not found — Thunderbolt resume patch left out (resume stays ~9 s slower)"
+    return 1
   fi
-elif (( acpi_needs_update )); then
-  warn "GFXALT-multi.aml not found — ACPI override skipped (required for GPU fix)"
+  if ! out="$(python3 "${SRC_DIR}/t2-tbt-acpi-patch.py" "$live" "$1/TbtOnPCH.aml" 2>&1)"; then
+    warn "Thunderbolt resume patch left out: ${out}"
+    rm -f -- "$1/TbtOnPCH.aml"
+    return 1
+  fi
+  bios="$(cat /sys/class/dmi/id/bios_version 2>/dev/null)" || bios=""
+  if [[ "$out" == already* ]]; then
+    rec="$(cat -- "$TBT_BIOS_FILE" 2>/dev/null)" || rec=""
+    if [[ "$rec" != "$bios" ]]; then
+      warn "Firmware is '${bios}', the Thunderbolt patch was made on '${rec:-unknown}' — leaving it out"
+      warn "  Reboot, then re-run install.sh to patch the table this firmware ships."
+      rm -f -- "$1/TbtOnPCH.aml"
+      return 1
+    fi
+  else
+    mkdir -p -- "$STATE_DIR"
+    printf '%s\n' "$bios" > "$TBT_BIOS_FILE"
+  fi
+  say "Thunderbolt resume patch: ${out}"
+}
+
+if (( DRY_RUN )); then
+  say "Would rebuild $ACPI_IMG: GFXALT-multi.aml + Apple TbtOnPCH patched for resume"
+else
+  tmpdir="$(mktemp -d)"
+  acpi_dir="$tmpdir/kernel/firmware/acpi"
+  mkdir -p "$acpi_dir"
+  if [[ -f "${SRC_DIR}/GFXALT-multi.aml" ]]; then
+    cp "${SRC_DIR}/GFXALT-multi.aml" "$acpi_dir/"
+  else
+    warn "GFXALT-multi.aml not found — GPU ACPI override left out (required for GPU fix)"
+  fi
+  tbt_table "$acpi_dir" || true
+  tables=("$acpi_dir"/*.aml)
+  if (( ${#tables[@]} == 0 )); then
+    warn "No ACPI tables to install — $ACPI_IMG not written"
+  else
+    # Fixed mtimes and device-independent inodes: the same tables always give
+    # the same bytes, so an unchanged image compares equal below.
+    find "$tmpdir/kernel" -exec touch -h -d @0 {} +
+    ( cd "$tmpdir" && find kernel | LC_ALL=C sort | cpio -H newc --quiet --reproducible -o ) > "$tmpdir/img"
+    names="$(cd "$acpi_dir" && echo *.aml)"
+    if [[ -f "$ACPI_IMG" ]] && cmp -s "$tmpdir/img" "$ACPI_IMG"; then
+      say "ACPI override is up to date: $ACPI_IMG ($names)"
+    else
+      if [[ -f "$ACPI_IMG" ]] && acpi_img_compressed "$ACPI_IMG"; then
+        say "Replacing gzip-compressed $ACPI_IMG — the kernel never read it"
+      fi
+      install -m0644 "$tmpdir/img" "$ACPI_IMG"
+      say "Installed: $ACPI_IMG ($names) — takes effect at the next boot"
+    fi
+  fi
+  rm -rf -- "$tmpdir"
 fi
 
 # ---------------------------------------------------------------------------
@@ -247,6 +319,13 @@ if ! (( DRY_RUN )); then mkdir -p /etc/modprobe.d /etc/udev/rules.d "$DRACUT_DIR
 install_file "${SRC_DIR}/amdgpu.conf"               "/etc/modprobe.d/amdgpu.conf"
 install_file "${SRC_DIR}/99-amdgpu-t2.rules"        "/etc/udev/rules.d/99-amdgpu-t2.rules"
 install_file "${SRC_DIR}/99-t2-usb.rules"           "/etc/udev/rules.d/99-t2-usb.rules"
+if (( DISABLE_WIFI )); then
+  install_file "${SRC_DIR}/99-t2-wifi-off.rules"    "/etc/udev/rules.d/99-t2-wifi-off.rules"
+  install_file "${SRC_DIR}/t2-wifi-off.conf"        "/etc/modprobe.d/t2-wifi-off.conf"
+elif [[ -f /etc/udev/rules.d/99-t2-wifi-off.rules || -f /etc/modprobe.d/t2-wifi-off.conf ]]; then
+  say "Keeping the --disable-wifi files — Wi-Fi stays off (delete /etc/udev/rules.d/99-t2-wifi-off.rules"
+  say "  and /etc/modprobe.d/t2-wifi-off.conf to bring it back)"
+fi
 install_file "${SRC_DIR}/10-amdgpu-warmfix.conf"    "${DRACUT_DIR}/10-amdgpu-warmfix.conf"
 install_file "${SRC_DIR}/20-amdgpu-t2-cmdline.conf" "${DRACUT_DIR}/20-amdgpu-t2-cmdline.conf"
 if ! (( DRY_RUN )); then

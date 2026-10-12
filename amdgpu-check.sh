@@ -64,6 +64,29 @@ inits=$(dmesg  2>/dev/null | grep -c "\[drm\] Initialized amdgpu" || true)
 echo
 say "GPU init events this boot: resets=${resets}  successful_inits=${inits}"
 
+# --- ACPI overrides ----------------------------------------------------------
+# Every table the kernel installs prints its header line at boot.  Read it from
+# the journal: the 256 KB printk buffer has wrapped long before a long uptime ends.
+echo
+say "ACPI overrides from /boot/acpi_override.img:"
+acpi_log=$(journalctl -k -b -o cat --no-pager 2>/dev/null | grep -E '^ACPI: SSDT .*(GFXALT|TbtOnPCH)')
+if grep -q 'GFXALT' <<<"$acpi_log"; then
+  ok  "GFXALT SSDT loaded (GPU _PR3/_DSM stubs)"
+else
+  warn "GFXALT SSDT not in this boot's log — layer 1 is not active"
+fi
+if grep -q 'TbtOnPCH 00001001' <<<"$acpi_log"; then
+  ok  "Thunderbolt resume patch active (TbtOnPCH OEM revision 0x1001)"
+  tbt_rec=$(cat /var/lib/t2-pci-amdgpu/TbtOnPCH.bios 2>/dev/null)
+  tbt_now=$(cat /sys/class/dmi/id/bios_version 2>/dev/null)
+  if [[ -n "$tbt_rec" && "$tbt_rec" != "$tbt_now" ]]; then
+    warn "  Patched on firmware '$tbt_rec', running '$tbt_now' — re-run install.sh"
+  fi
+elif grep -q 'TbtOnPCH' <<<"$acpi_log"; then
+  warn "Apple's own TbtOnPCH is live — each S3 resume spends ~9 s in its _PS0 waits"
+  warn "  Re-run install.sh and reboot to load the patched copy."
+fi
+
 # --- Warmfix service log -----------------------------------------------------
 echo
 say "Warmfix service log (last 15 lines):"
