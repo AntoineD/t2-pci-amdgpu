@@ -13,19 +13,8 @@ echo "=== AMDGPU T2 Health Check ==="
 echo
 
 # --- AMD GPU DRM nodes ---------------------------------------------------------
-# Only nodes under an AMD VGA function count.  A global /dev/dri glob also sees
-# i915 (iGPU-enabled MacBookPros) or an eGPU, and would call a dead dGPU healthy.
-amd_nodes() {  # amd_nodes renderD|card — /dev/dri paths of AMD VGA DRM nodes
-  local d n ven cls
-  for d in /sys/bus/pci/devices/*; do
-    read -r ven 2>/dev/null < "$d/vendor" || continue
-    read -r cls 2>/dev/null < "$d/class"  || continue
-    [[ "$ven" == "0x1002" && "$cls" == 0x0300* ]] || continue
-    for n in "$d"/drm/"$1"*; do
-      [[ -e "$n" ]] && printf '/dev/dri/%s ' "${n##*/}"
-    done
-  done
-}
+# Only nodes under an AMD VGA function count — see t2-amd-nodes.sh.
+amd_nodes() { "$(dirname "${BASH_SOURCE[0]}")/t2-amd-nodes.sh" "$1"; }
 
 render=$(amd_nodes renderD)
 if [[ -n "$render" ]]; then
@@ -66,16 +55,22 @@ fi
 # Only 0x2b0 is known broken; any other size is reported but not judged.
 echo
 say "Installed kernels (amdgpu imac5k_table quirk):"
+# The decompressed module is tens of MB; the EXIT trap removes it if the
+# check is interrupted mid-scan.
+imac5k_tmp=""
+trap 'rm -f -- "$imac5k_tmp"' EXIT
 imac5k_size() {  # imac5k_size <amdgpu.ko[.xz|.zst]> — hex size, empty if absent
-  local ko=$1 tmp
-  tmp=$(mktemp) || return 1
+  local ko=$1 rc=0
+  imac5k_tmp=$(mktemp) || return 1
   case "$ko" in
-    *.xz)  xz -dc "$ko"   >"$tmp" 2>/dev/null ;;
-    *.zst) zstd -dcq "$ko" >"$tmp" 2>/dev/null ;;
-    *)     cat "$ko"      >"$tmp" ;;
-  esac || { rm -f "$tmp"; return 1; }
-  nm -S "$tmp" 2>/dev/null | awk '$4 == "imac5k_table" { sub(/^0+/, "", $2); print $2 }'
-  rm -f "$tmp"
+    *.xz)  xz -dc "$ko"   >"$imac5k_tmp" 2>/dev/null ;;
+    *.zst) zstd -dcq "$ko" >"$imac5k_tmp" 2>/dev/null ;;
+    *)     cat "$ko"      >"$imac5k_tmp" ;;
+  esac || rc=1
+  (( rc )) || nm -S "$imac5k_tmp" 2>/dev/null | awk '$4 == "imac5k_table" { sub(/^0+/, "", $2); print $2 }'
+  rm -f -- "$imac5k_tmp"
+  imac5k_tmp=""
+  return "$rc"
 }
 if ! command -v nm >/dev/null; then
   warn "nm not found (binutils) — cannot inspect installed kernels"
@@ -107,19 +102,30 @@ else
   [[ $EUID -eq 0 ]] || warn "Run as root to also check which kernel GRUB boots by default"
 fi
 
-# --- GPU init events from dmesg ----------------------------------------------
-resets=$(dmesg 2>/dev/null | grep -c "amdgpu .*resetting" || true)
-inits=$(dmesg  2>/dev/null | grep -c "\[drm\] Initialized amdgpu" || true)
+# --- GPU init events from the kernel journal ---------------------------------
+# Not dmesg: it fails for non-root under kernel.dmesg_restrict (Fedora's
+# default), and the 256 KB printk buffer wraps on a long uptime.  A booted
+# kernel always has messages, so an empty read means no journal access, which
+# must not pass for "zero events" or "no ACPI table".
+klog=$(journalctl -k -b -o cat --no-pager 2>/dev/null)
 echo
-say "GPU init events this boot: resets=${resets}  successful_inits=${inits}"
+if [[ -z "$klog" ]]; then
+  warn "Cannot read the kernel journal — run as root for GPU init events and ACPI overrides"
+else
+  resets=$(grep -c "amdgpu .*resetting" <<<"$klog" || true)
+  inits=$(grep -c "\[drm\] Initialized amdgpu" <<<"$klog" || true)
+  say "GPU init events this boot: resets=${resets}  successful_inits=${inits}"
+fi
 
 # --- ACPI overrides ----------------------------------------------------------
 # Every table the kernel installs prints its header line at boot.  Read it from
 # the journal: the 256 KB printk buffer has wrapped long before a long uptime ends.
 echo
 say "ACPI overrides from /boot/acpi_override.img:"
-acpi_log=$(journalctl -k -b -o cat --no-pager 2>/dev/null | grep -E '^ACPI: SSDT .*(GFXALT|TbtOnPCH)')
-if grep -q 'GFXALT' <<<"$acpi_log"; then
+acpi_log=$(grep -E '^ACPI: SSDT .*(GFXALT|TbtOnPCH)' <<<"$klog")
+if [[ -z "$klog" ]]; then
+  warn "Kernel journal not readable — ACPI overrides not checked"
+elif grep -q 'GFXALT' <<<"$acpi_log"; then
   ok  "GFXALT SSDT loaded (GPU _PR3/_DSM stubs)"
 else
   warn "GFXALT SSDT not in this boot's log — layer 1 is not active"

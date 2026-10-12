@@ -193,10 +193,11 @@ if ! /usr/local/bin/t2-wait-sysfs.sh -t 10 "$GPU_VGA"; then
   exit 0
 fi
 
-# Already up: nothing to wait for and nothing to fix.
-skip_if_cold_probe_ok
-
-# Let any in-flight or pending coldplug probe finish before deciding.
+# Let any in-flight or pending coldplug probe finish before deciding.  No skip
+# check before this: a render node seen once only means drm_dev_register() ran,
+# and the probe can still fail after it and unregister the node (see
+# amdgpu_probe_settled).  Skipping on that sighting would leave the GPU dead
+# with no reset; the settled streak costs ~1.5s on a healthy boot.
 wait_amdgpu_settled || exit 1
 skip_if_cold_probe_ok
 
@@ -211,7 +212,6 @@ else
   # exactly like removing into the cold one.
   wait_amdgpu_settled || exit 1
   pci_remove_rescan
-  sleep 5
   if wait_for_gpu; then
     log "Stage 2: GPU initialized on retry"
   else

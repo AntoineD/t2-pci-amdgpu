@@ -203,6 +203,7 @@ tbt_table() {
     fi
   else
     mkdir -p -- "$STATE_DIR"
+    backup "$TBT_BIOS_FILE"
     printf '%s\n' "$bios" > "$TBT_BIOS_FILE"
   fi
   say "Thunderbolt resume patch: ${out}"
@@ -235,6 +236,7 @@ else
       if [[ -f "$ACPI_IMG" ]] && acpi_img_compressed "$ACPI_IMG"; then
         say "Replacing gzip-compressed $ACPI_IMG — the kernel never read it"
       fi
+      backup "$ACPI_IMG"
       install -m0644 "$tmpdir/img" "$ACPI_IMG"
       say "Installed: $ACPI_IMG ($names) — takes effect at the next boot"
     fi
@@ -449,8 +451,13 @@ enable_service "applesmc-late.service"
 if (( DRY_RUN )); then
   say "Would restart t2fanrd.service if running"
 elif systemctl is-active --quiet t2fanrd.service; then
-  systemctl try-restart t2fanrd.service
-  say "Restarted t2fanrd.service — new fan config and unit are live"
+  # Not fatal: a daemon that fails to come back must not abort the install
+  # before the display-manager drop-in and the GRUB steps below.
+  if systemctl try-restart t2fanrd.service; then
+    say "Restarted t2fanrd.service — new fan config and unit are live"
+  else
+    warn "t2fanrd.service failed to restart — check: journalctl -u t2fanrd -b"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -546,7 +553,10 @@ else
   cur_cmdline="$(grub_var GRUB_CMDLINE_LINUX)"
   merged=()
   had_nomodeset=0
-  for w in $cur_cmdline; do
+  # read -ra, not an unquoted expansion: with nullglob set, a word containing
+  # * ? or [ that matches no file would silently vanish from the line.
+  read -ra cmdline_words <<<"$cur_cmdline"
+  for w in "${cmdline_words[@]}"; do
     if [[ "$w" == nomodeset || "$w" == amdgpu.modeset=0 ]]; then
       had_nomodeset=1          # drop it: it disables the amdgpu driver entirely
       continue
