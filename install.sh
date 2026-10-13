@@ -56,11 +56,20 @@ backup() {
 }
 
 # install_file SRC DST [MODE]  — backup DST if present, then install SRC → DST
+#
+# An identical DST (same bytes, same mode) is left alone.  Its mtime then still
+# says when it last really changed, which the closing "Action required" check
+# compares against the boot time and the initramfs.
 install_file() {
   local src="$1" dst="$2" mode="${3:-0644}"
   if [[ ! -f "$src" ]]; then
     warn "Not found, skipping: $src"
     return
+  fi
+  if [[ -f "$dst" ]] && cmp -s -- "$src" "$dst" \
+     && [[ "$(stat -c %a -- "$dst")" == "${mode#0}" ]]; then
+    say "Up to date: $dst"
+    return 0
   fi
   if (( DRY_RUN )); then say "Would install: $src → $dst (mode $mode)"; return 0; fi
   backup "$dst"
@@ -283,7 +292,7 @@ if [[ -f "$template" ]]; then
   if (( DRY_RUN )); then
     say "Would generate: $target (slot: ${slot})"
   else
-    backup "$target"
+    gen="$(mktemp)"
     {
       cat <<'HDR'
 #!/usr/bin/env bash
@@ -292,9 +301,9 @@ set -Eeuo pipefail
 log(){ echo "[amdgpu-warmfix] $*"; }
 HDR
       sed "s/ADDR/${slot}/g" "$template"
-    } > "$target"
-    chmod 0755 "$target"
-    say "Installed: $target (slot: ${slot})"
+    } > "$gen"
+    install_file "$gen" "$target" 0755
+    rm -f -- "$gen"
   fi
 else
   warn "Template not found: $template — skipping GPU reset script"
@@ -472,16 +481,15 @@ fi
 if (( DRY_RUN )); then
   say "Would install DM drop-in: ${drop_dir}/10-amdgpu-warmfix.conf"
 else
-  mkdir -p "$drop_dir"
-  backup "${drop_dir}/10-amdgpu-warmfix.conf"
-  cat > "${drop_dir}/10-amdgpu-warmfix.conf" <<'EOF'
+  gen="$(mktemp)"
+  cat > "$gen" <<'EOF'
 [Unit]
 After=amdgpu-warmfix.service
 Wants=amdgpu-warmfix.service
 EOF
-  chmod 0644 "${drop_dir}/10-amdgpu-warmfix.conf"
+  install_file "$gen" "${drop_dir}/10-amdgpu-warmfix.conf"
+  rm -f -- "$gen"
   systemctl daemon-reload
-  say "Drop-in installed: ${drop_dir}/10-amdgpu-warmfix.conf"
 fi
 
 # ---------------------------------------------------------------------------
@@ -519,40 +527,35 @@ grub_var() {
   printf '%s' "$line"
 }
 
-echo
-echo "====== Action required: ${GRUB_FILE}  (detected: ${boot_mode}) ======"
-echo
+# has_word WORD STRING — WORD is one of STRING's whitespace-separated words
+has_word() { [[ " $2 " == *[[:space:]]"$1"[[:space:]]* ]]; }
 
+# cmdline_ok STRING — every REQUIRED_PARAMS word present, amdgpu not disabled
+cmdline_ok() {
+  local p
+  for p in "${REQUIRED_PARAMS[@]}"; do has_word "$p" "$1" || return 1; done
+  ! has_word nomodeset "$1" && ! has_word amdgpu.modeset=0 "$1"
+}
+
+# mtime PATH — modification time in epoch seconds, 0 when PATH is missing
+mtime() { stat -c %Y -- "$1" 2>/dev/null || echo 0; }
+
+# ---------------------------------------------------------------------------
+# Work out which follow-up steps are still outstanding.  Each check is one the
+# printed command satisfies, so after doing the steps (and rebooting) a re-run
+# prints no "Action required" block at all.
+# ---------------------------------------------------------------------------
+
+# --- a) /etc/default/grub ---------------------------------------------------
+grub_missing=0 initrd_edit=0 cmdline_edit=0 had_nomodeset=0
+cur_initrd="" merged=() missing=()
 if [[ ! -f "$GRUB_FILE" ]]; then
-  echo "1. Bootloader configuration"
-  warn "${GRUB_FILE} not found — set these by hand in your bootloader config:"
-  echo "    GRUB_EARLY_INITRD_LINUX_CUSTOM=\"acpi_override.img\""
-  echo "    GRUB_CMDLINE_LINUX=\"${REQUIRED_PARAMS[*]}\""
+  grub_missing=1
 else
-  echo "1. Edit ${GRUB_FILE} — two variables, described one at a time."
-  echo
-
-  # --- a) early initrd -------------------------------------------------------
   cur_initrd="$(grub_var GRUB_EARLY_INITRD_LINUX_CUSTOM)"
-  echo "   a) GRUB_EARLY_INITRD_LINUX_CUSTOM — loads the ACPI override image"
-  if [[ "$cur_initrd" == *acpi_override.img* ]]; then
-    echo "      Already correct, nothing to do:"
-    echo "        GRUB_EARLY_INITRD_LINUX_CUSTOM=\"${cur_initrd}\""
-  elif [[ -n "$cur_initrd" ]]; then
-    echo "      Set to \"${cur_initrd}\" — append acpi_override.img, so the line becomes:"
-    echo
-    echo "        GRUB_EARLY_INITRD_LINUX_CUSTOM=\"${cur_initrd} acpi_override.img\""
-  else
-    echo "      Not set. Add this line:"
-    echo
-    echo "        GRUB_EARLY_INITRD_LINUX_CUSTOM=\"acpi_override.img\""
-  fi
-  echo
+  [[ "$cur_initrd" == *acpi_override.img* ]] || initrd_edit=1
 
-  # --- b) kernel cmdline -----------------------------------------------------
   cur_cmdline="$(grub_var GRUB_CMDLINE_LINUX)"
-  merged=()
-  had_nomodeset=0
   # read -ra, not an unquoted expansion: with nullglob set, a word containing
   # * ? or [ that matches no file would silently vanish from the line.
   read -ra cmdline_words <<<"$cur_cmdline"
@@ -563,17 +566,156 @@ else
     fi
     merged+=("$w")
   done
-  missing=()
   for p in "${REQUIRED_PARAMS[@]}"; do
-    found=0
-    for w in "${merged[@]}"; do [[ "$w" == "$p" ]] && { found=1; break; }; done
-    (( found )) || { missing+=("$p"); merged+=("$p"); }
+    has_word "$p" "${merged[*]}" || { missing+=("$p"); merged+=("$p"); }
   done
+  if (( ${#missing[@]} || had_nomodeset )); then cmdline_edit=1; fi
+fi
 
-  echo "   b) GRUB_CMDLINE_LINUX — kernel parameters"
-  if (( ${#missing[@]} == 0 && had_nomodeset == 0 )); then
-    echo "      Already correct, nothing to do."
+# --- b) what GRUB actually boots ---------------------------------------------
+# With BLS (GRUB_ENABLE_BLSCFG=true, the Fedora default) the kernel cmdline
+# lives in each /boot/loader/entries/*.conf, and a plain grub2-mkconfig does
+# not touch those: the new GRUB_CMDLINE_LINUX would reach no kernel at all.
+# grub2-mkconfig --update-bls-cmdline (Fedora 39+) rewrites the entries too;
+# otherwise grubby does.  Fedora's 10_linux puts GRUB_EARLY_INITRD_LINUX_CUSTOM
+# into grubenv as early_initrd — the BLS entries never name it.
+bls=0 bls_update=0
+generated_ok=1 entries_ok=1 entries_seen=0 entries_nomodeset=0
+
+note_entry() {
+  entries_seen=$((entries_seen + 1))
+  cmdline_ok "$1" || entries_ok=0
+  if has_word nomodeset "$1" || has_word amdgpu.modeset=0 "$1"; then
+    entries_nomodeset=1
+  fi
+}
+
+if (( ! grub_missing )); then
+  [[ "$(grub_var GRUB_ENABLE_BLSCFG)" == "true" ]] && bls=1
+  if (( bls )); then
+    [[ "$(grub2-mkconfig --help 2>/dev/null)" == *--update-bls-cmdline* ]] && bls_update=1
+    env_initrd="$(grub2-editenv - list 2>/dev/null | sed -n 's/^early_initrd=//p')" || env_initrd=""
+    [[ "$env_initrd" == *acpi_override.img* ]] || generated_ok=0
   else
+    grep -qs 'acpi_override\.img' "$grub_cfg" || generated_ok=0
+  fi
+
+  if command -v grubby &>/dev/null; then
+    while IFS= read -r line; do
+      [[ "$line" == args=* ]] || continue
+      line="${line#args=}"; line="${line#\"}"; line="${line%\"}"
+      note_entry "$line"
+    done < <(grubby --info=ALL 2>/dev/null)
+  elif (( ! bls )) && [[ -r "$grub_cfg" ]]; then
+    while read -r kw rest; do
+      if [[ "$kw" == linux* ]]; then note_entry "$rest"; fi
+    done < "$grub_cfg"
+  fi
+  # Nothing readable is nothing verified.
+  (( entries_seen )) || entries_ok=0
+fi
+
+need_mkconfig=0 need_grubby=0
+if (( ! grub_missing )); then
+  if (( initrd_edit || cmdline_edit || ! generated_ok )); then need_mkconfig=1; fi
+  if (( ! entries_ok )); then
+    if (( bls && ! bls_update )); then need_grubby=1; else need_mkconfig=1; fi
+  fi
+fi
+mkconfig_cmd="sudo grub2-mkconfig -o ${grub_cfg}"
+(( bls_update )) && mkconfig_cmd+=" --update-bls-cmdline"
+
+# --- c) initramfs -------------------------------------------------------------
+# dracut embeds these files; an image older than the newest of them predates
+# the current config.  Rescue and kdump images have no /lib/modules/<name>.
+initramfs_inputs=(
+  "${DRACUT_DIR}/10-amdgpu-warmfix.conf"
+  "${DRACUT_DIR}/20-amdgpu-t2-cmdline.conf"
+  /etc/modprobe.d/amdgpu.conf
+  /etc/modprobe.d/t2-wifi-off.conf
+)
+newest_input=0
+for f in "${initramfs_inputs[@]}"; do
+  m="$(mtime "$f")"
+  if (( m > newest_input )); then newest_input=$m; fi
+done
+stale_kvers=()
+for img in /boot/initramfs-*.img; do
+  kver="${img#/boot/initramfs-}"; kver="${kver%.img}"
+  [[ -d "/lib/modules/${kver}" ]] || continue
+  if (( $(mtime "$img") < newest_input )); then stale_kvers+=("$kver"); fi
+done
+
+# --- d) reboot ------------------------------------------------------------------
+# Every file here is read only at boot.  install_file leaves identical files
+# untouched, so an mtime after this boot means a change the system has not
+# booted with yet — from this run or an earlier one.
+boot_time="$(awk '/^btime/ {print $2}' /proc/stat)"
+reboot_why=()
+for f in "$ACPI_IMG" \
+         "${BIN_DIR}/amdgpu-pci-reset-load.sh" \
+         "${UNIT_DIR}/amdgpu-warmfix.service" \
+         "${drop_dir}/10-amdgpu-warmfix.conf" \
+         /etc/udev/rules.d/99-amdgpu-t2.rules \
+         /etc/udev/rules.d/99-t2-usb.rules \
+         /etc/udev/rules.d/99-t2-wifi-off.rules \
+         "${initramfs_inputs[@]}"; do
+  if (( $(mtime "$f") > boot_time )); then reboot_why+=("$f (changed since boot)"); fi
+done
+if ! cmdline_ok "$(cat /proc/cmdline)"; then
+  reboot_why+=("kernel parameters: /proc/cmdline lacks ${REQUIRED_PARAMS[*]} or has nomodeset")
+fi
+# The journal, not dmesg: the printk buffer wraps.
+kmsg="$(journalctl -k -b -q --no-pager 2>/dev/null)" || kmsg=""
+if [[ -f "$ACPI_IMG" && -n "$kmsg" && "$kmsg" != *GFXALT* ]]; then
+  reboot_why+=("GFXALT SSDT: not loaded in this boot")
+fi
+
+pending_setup=$(( grub_missing || initrd_edit || cmdline_edit || need_mkconfig \
+                  || need_grubby || ${#stale_kvers[@]} ))
+
+if (( ! pending_setup && ${#reboot_why[@]} == 0 )); then
+  say "No action required — bootloader, initramfs and the running boot are up to date."
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Print only the outstanding steps, numbered in order
+# ---------------------------------------------------------------------------
+n=0
+echo
+echo "====== Action required ======"
+(( DRY_RUN )) && echo "(dry run: reflects the system as it is now, before the changes above)"
+echo
+
+if (( grub_missing )); then
+  n=$((n + 1))
+  echo "${n}. Bootloader configuration"
+  warn "${GRUB_FILE} not found — set these by hand in your bootloader config:"
+  echo "    GRUB_EARLY_INITRD_LINUX_CUSTOM=\"acpi_override.img\""
+  echo "    GRUB_CMDLINE_LINUX=\"${REQUIRED_PARAMS[*]}\""
+  echo
+fi
+
+if (( initrd_edit || cmdline_edit )); then
+  n=$((n + 1))
+  echo "${n}. Edit ${GRUB_FILE}:"
+  echo
+  if (( initrd_edit )); then
+    echo "   GRUB_EARLY_INITRD_LINUX_CUSTOM — loads the ACPI override image"
+    if [[ -n "$cur_initrd" ]]; then
+      echo "      Set to \"${cur_initrd}\" — append acpi_override.img, so the line becomes:"
+      echo
+      echo "        GRUB_EARLY_INITRD_LINUX_CUSTOM=\"${cur_initrd} acpi_override.img\""
+    else
+      echo "      Not set. Add this line:"
+      echo
+      echo "        GRUB_EARLY_INITRD_LINUX_CUSTOM=\"acpi_override.img\""
+    fi
+    echo
+  fi
+  if (( cmdline_edit )); then
+    echo "   GRUB_CMDLINE_LINUX — kernel parameters"
     (( ${#missing[@]} )) && \
       echo "      Missing ${#missing[@]} parameter(s): ${missing[*]}"
     (( had_nomodeset )) && \
@@ -581,38 +723,49 @@ else
     echo "      Your existing parameters are kept. Replace the whole line with:"
     echo
     echo "        GRUB_CMDLINE_LINUX=\"${merged[*]}\""
+    echo
   fi
 fi
 
-# With BLS (GRUB_ENABLE_BLSCFG=true, the Fedora default) the kernel cmdline
-# lives in each /boot/loader/entries/*.conf, and a plain grub2-mkconfig does
-# not touch those: the new GRUB_CMDLINE_LINUX would reach no kernel at all.
-# grub2-mkconfig --update-bls-cmdline (Fedora 39+) rewrites the entries too.
-mkconfig_cmd="sudo grub2-mkconfig -o ${grub_cfg}"
-bls_note=""
-if [[ "$(grub_var GRUB_ENABLE_BLSCFG)" == "true" ]]; then
-  if grub2-mkconfig --help 2>/dev/null | grep -q -- '--update-bls-cmdline'; then
-    mkconfig_cmd+=" --update-bls-cmdline"
+if (( need_mkconfig )); then
+  n=$((n + 1))
+  echo "${n}. Regenerate the GRUB config (${boot_mode}):"
+  echo
+  echo "     ${mkconfig_cmd}"
+  echo
+fi
+
+if (( need_grubby )); then
+  n=$((n + 1))
+  echo "${n}. Apply the kernel parameters to every installed kernel — BLS entries"
+  echo "   carry their own cmdline and this grub2-mkconfig cannot update them:"
+  echo
+  echo "     sudo grubby --update-kernel=ALL --args=\"${REQUIRED_PARAMS[*]}\""
+  (( entries_nomodeset )) && \
+    echo "     sudo grubby --update-kernel=ALL --remove-args=\"nomodeset amdgpu.modeset=0\""
+  echo
+fi
+
+if (( ${#stale_kvers[@]} )); then
+  n=$((n + 1))
+  echo "${n}. Rebuild the initramfs — older than the dracut/modprobe config it embeds:"
+  echo
+  if (( ${#stale_kvers[@]} > 1 )); then
+    echo "     sudo dracut -f --regenerate-all"
   else
-    bls_note="     BLS entries carry their own cmdline and this grub2-mkconfig cannot
-     update them; apply the parameters to every installed kernel with:
-
-       sudo grubby --update-kernel=ALL --args=\"${REQUIRED_PARAMS[*]}\"
-"
-    (( had_nomodeset )) && bls_note+="       sudo grubby --update-kernel=ALL --remove-args=\"nomodeset amdgpu.modeset=0\"
-"
+    echo "     sudo dracut -f --kver ${stale_kvers[0]}"
   fi
+  echo
 fi
 
-cat <<EOF
+n=$((n + 1))
+echo "${n}. Reboot."
+if (( ${#reboot_why[@]} )); then
+  echo "   Not yet active in the running boot:"
+  printf '     %s\n' "${reboot_why[@]}"
+fi
 
-2. Regenerate the GRUB config and the initramfs:
-
-     ${mkconfig_cmd}
-     sudo dracut -f
-${bls_note:+
-${bls_note}}
-3. Reboot.
+cat <<'EOF'
 
 ======================================================================
 
