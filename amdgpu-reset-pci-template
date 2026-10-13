@@ -32,15 +32,21 @@ amdgpu_module_live() {
 # device is unbound, and the probe re-runs from deferred_probe_work_func once
 # gmux registers.  debugfs is the only place the list is visible; when it is
 # not readable, fall back to the one precondition we know of — a gmux in ACPI
-# (APP000B) whose driver is not live yet.
+# (APP000B) with no driver bound to its PNP node.  Test the binding, not
+# /sys/module/apple_gmux/initstate: a built-in gmux has no initstate file and
+# would read as "deferred" forever, and a loaded gmux whose probe failed is
+# "live" yet never registers the switcheroo handler amdgpu is waiting for.
 amdgpu_probe_deferred() {
-  local f=/sys/kernel/debug/devices_deferred
+  local f=/sys/kernel/debug/devices_deferred gmux
   if [ -r "$f" ]; then
     grep -q "^${GPU_VGA##*/}[[:space:]]" "$f"
     return
   fi
-  ls -d /sys/bus/acpi/devices/APP000B:* &>/dev/null || return 1
-  [ "$(cat /sys/module/apple_gmux/initstate 2>/dev/null)" != live ]
+  for gmux in /sys/bus/acpi/devices/APP000B:*; do
+    [ -e "$gmux" ] || continue
+    [ -e "$gmux/physical_node/driver" ] || return 0
+  done
+  return 1
 }
 
 # True once really_probe() for the VGA function has reached a terminal state:
