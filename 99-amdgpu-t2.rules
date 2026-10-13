@@ -21,3 +21,11 @@ ACTION=="add", SUBSYSTEM=="pci", \
 # See https://wiki.t2linux.org/guides/hybrid-graphics/
 SUBSYSTEM=="drm", DRIVERS=="amdgpu", \
   ATTR{device/power_dpm_force_performance_level}="low"
+
+# Record that amdgpu's probe returned success, for the warmfix's settle wait.
+# driver_bound() sends "bind" only after amdgpu_pci_probe() has returned 0, so
+# this marks the true end of the probe.  udev's DRIVER= property cannot:
+# really_probe() sets the driver before the probe runs, so any uevent during
+# the probe carries DRIVER=amdgpu too.  Removing the device drops the record.
+ACTION=="bind", SUBSYSTEM=="pci", DRIVER=="amdgpu", \
+  ENV{AMDGPU_WARMFIX_BOUND}="1"

@@ -66,7 +66,7 @@ device a given unit needs is present. Each unit now waits on its own preconditio
 | File | Installed to | Description |
 | --- | --- | --- |
 | `amdgpu.conf` | `/etc/modprobe.d/` | Sets `amdgpu.aspm=0` and `amdgpu.runpm=0` at module level; blacklists `radeon`; sets `snd_hda_intel.power_save_controller=0` so the GPU's HDMI audio function stays out of runtime suspend |
-| `99-amdgpu-t2.rules` | `/etc/udev/rules.d/` | Pins the AMD VGA function to `power/control=on` at device bind; sets DPM to `low`. Also targets the HDMI audio function, but that write is best-effort — `snd_hda_intel` resets it to `auto` when it binds, which is why the module option above exists |
+| `99-amdgpu-t2.rules` | `/etc/udev/rules.d/` | Pins the AMD VGA function to `power/control=on` at device bind; sets DPM to `low`; records amdgpu's successful bind (`AMDGPU_WARMFIX_BOUND=1`) so the warmfix can stop waiting for the probe. Also targets the HDMI audio function, but that write is best-effort — `snd_hda_intel` resets it to `auto` when it binds, which is why the module option above exists |
 | `99-t2-usb.rules` | `/etc/udev/rules.d/` | Pins USB root hubs (`idVendor=1d6b`, hub class `09`) to `power/control=on`. T2 xHCI hubs autosuspend aggressively and stop reporting device attach events; pinning the root hubs awake fixes USB-to-Ethernet adapters and similar devices not appearing in `lsusb`. |
 | `99-t2-wifi-off.rules` | `/etc/udev/rules.d/` | Only with `install.sh --disable-wifi`. Removes the Wi-Fi (ACPI `ARPT`) and its root port from the PCI tree at boot, so Apple's 1 s link waits on that port no longer run on every suspend and resume. Bluetooth is unaffected — it is on the UART. |
 | `t2-wifi-off.conf` | `/etc/modprobe.d/` | Only with `install.sh --disable-wifi`. Blacklists `brcmfmac`, which without Apple's firmware files only fails its probe and logs a `__flush_work` warning every boot. |
@@ -207,22 +207,29 @@ systemctl status amdgpu-warmfix.service --no-pager
 journalctl -u amdgpu-warmfix.service -b --no-pager
 ```
 
-When amdgpu's cold probe succeeded, no reset is needed and the warmfix logs one line:
+When amdgpu's cold probe succeeded, no reset is needed:
 
 ```
+[amdgpu-warmfix] amdgpu probe ended (bound), settled after X.Xs
 [amdgpu-warmfix] cold probe already succeeded: /dev/dri/renderD128 — skipping remove/rescan
 ```
 
 When the cold probe failed, the warmfix resets the GPU:
 
 ```
+[amdgpu-warmfix] amdgpu probe ended (failed), settled after X.Xs
 [amdgpu-warmfix] Stage 2: PCI remove/rescan (attempt 1)
-[amdgpu-warmfix] remove 0000:03:00.1 (audio)
-[amdgpu-warmfix] remove 0000:03:00.0 (vga)
+[amdgpu-warmfix] remove /sys/bus/pci/devices/0000:03:00.1 (audio)
+[amdgpu-warmfix] remove /sys/bus/pci/devices/0000:03:00.0 (vga)
 [amdgpu-warmfix] rescanning PCI bus
-[amdgpu-warmfix] GPU ready after Xs: /dev/dri/renderD128
+[amdgpu-warmfix] GPU ready X.Xs after rescan: /dev/dri/renderD128
 [amdgpu-warmfix] Stage 2: GPU initialized successfully
 ```
+
+The first line says what ended the wait for amdgpu's probe: `bound` (udev saw
+the driver bind) or `failed` (the kernel logged the probe failure). `settled
+after X.Xs (no end signal seen)` means neither showed up and the warmfix waited
+the full ~1.5 s instead; check that `99-amdgpu-t2.rules` is installed.
 
 If the first attempt fails, the warmfix retries automatically:
 
