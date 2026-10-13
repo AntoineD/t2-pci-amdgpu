@@ -210,7 +210,7 @@ journalctl -u amdgpu-warmfix.service -b --no-pager
 When amdgpu's cold probe succeeded, no reset is needed:
 
 ```
-[amdgpu-warmfix] amdgpu probe ended (bound), settled after X.Xs
+[amdgpu-warmfix] amdgpu probe ended (fbdev), settled after X.Xs
 [amdgpu-warmfix] cold probe already succeeded: /dev/dri/renderD128 — skipping remove/rescan
 ```
 
@@ -226,10 +226,11 @@ When the cold probe failed, the warmfix resets the GPU:
 [amdgpu-warmfix] Stage 2: GPU initialized successfully
 ```
 
-The first line says what ended the wait for amdgpu's probe: `bound` (udev saw
-the driver bind) or `failed` (the kernel logged the probe failure). `settled
-after X.Xs (no end signal seen)` means neither showed up and the warmfix waited
-the full ~1.5 s instead; check that `99-amdgpu-t2.rules` is installed.
+The first line says what ended the wait for amdgpu's probe: `fbdev` (the
+kernel logged amdgpu's framebuffer), `bound` (udev saw the driver bind) or
+`failed` (the kernel logged the probe failure). `settled after X.Xs (no end
+signal seen)` means none showed up and the warmfix waited the full ~1.5 s
+instead.
 
 If the first attempt fails, the warmfix retries automatically:
 

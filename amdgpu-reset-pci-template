@@ -74,32 +74,48 @@ amdgpu_probe_settled() {
   return 0
 }
 
-# True once the probe has sent one of its two end signals, both outside sysfs.
+# True once the probe has sent one of its end signals, all outside sysfs.
 # Sets probe_end to which one:
 #   bound   udev has processed the "bind" uevent, which driver_bound() sends
 #           only after amdgpu_pci_probe() returned 0; 99-amdgpu-t2.rules
 #           records it as AMDGPU_WARMFIX_BOUND=1.  Not udev's DRIVER=: that
 #           comes from dev->driver, which really_probe() sets before calling
 #           the probe, so any uevent during the probe carries it too.
+#   fbdev   the kernel logged "[drm] fbN: ... frame buffer device" for this
+#           function.  amdgpu_pci_probe() sets up fbdev after every step that
+#           can fail it; only debugfs (a failure is logged, not returned) and
+#           runtime PM (off, runpm=0) follow before `return 0`.  It comes
+#           sooner than the bind record (iMac20,2: line at 8.475s, bind seen
+#           at 9.337s, udev being busy with amdgpu's child devices), and it
+#           survives switch-root, which the bind record does not.
 #   failed  the driver core logged "probe with driver amdgpu failed", which it
-#           does once amdgpu_pci_probe() has returned.  Only lines logged since
-#           the last `remove` count (fail_baseline): the cold probe's line is
-#           still in the buffer after a rescan.
+#           does once amdgpu_pci_probe() has returned.
+# Kernel log lines count only if logged since the last `remove` (the
+# baselines): the cold probe's lines are still in the buffer after a rescan.
 # dmesg, not the journal: journald ingests the kernel log in bursts.  If the
-# ring buffer has wrapped, the count stays at the baseline and the plain
-# settle streak decides, as it did before these signals.
-FAIL_LINE="${GPU_VGA##*/}: probe with driver amdgpu failed"
+# ring buffer has wrapped, a count stays at its baseline and the plain settle
+# streak decides, as it did before these signals.
 fail_baseline=0
+fbdev_baseline=0
 probe_end=""
 probe_fail_count() {
-  dmesg 2>/dev/null | grep -cF -- "$FAIL_LINE" || true
+  dmesg 2>/dev/null | grep -cF -- "${GPU_VGA##*/}: probe with driver amdgpu failed" || true
+}
+probe_fbdev_count() {
+  dmesg 2>/dev/null | grep -F -- "${GPU_VGA##*/}: [drm] fb" \
+    | grep -cF -- " frame buffer device" || true
 }
 amdgpu_probe_ended() {
   local props
   if [ -e "$GPU_VGA/driver" ]; then
-    props=$(udevadm info -q property -p "$GPU_VGA" 2>/dev/null) || return 1
-    [[ $'\n'"$props"$'\n' == *$'\n'AMDGPU_WARMFIX_BOUND=1$'\n'* ]] || return 1
-    probe_end=bound
+    props=$(udevadm info -q property -p "$GPU_VGA" 2>/dev/null) || props=""
+    if [[ $'\n'"$props"$'\n' == *$'\n'AMDGPU_WARMFIX_BOUND=1$'\n'* ]]; then
+      probe_end=bound
+    elif [ "$(probe_fbdev_count)" -gt "$fbdev_baseline" ]; then
+      probe_end=fbdev
+    else
+      return 1
+    fi
   else
     [ "$(probe_fail_count)" -gt "$fail_baseline" ] || return 1
     probe_end=failed
@@ -138,8 +154,11 @@ amdgpu_probe_ended() {
 # An end signal from amdgpu_probe_ended() cuts the run short.  The full run
 # cost 1.5-2.0s on every boot (iMac20,2: failure logged at 10.6s, `remove` at
 # 12.4s; probe done, fbdev up, at 8.5s, skip at 10.5s).
-#   bound   return at once: the probe has returned, and the skip that
-#           normally follows writes nothing.
+#   bound, fbdev
+#           return at once: the probe has returned or can no longer fail,
+#           and the skip that normally follows writes nothing.  A `remove`
+#           (AMDGPU_WARMFIX_ALWAYS_RESET) waits on the device lock until the
+#           probe returns, then unbinds a fully probed device.
 #   failed  still SETTLE_STABLE_FAILED polls (~0.5s).  The line is logged
 #           before really_probe() is done: driver_sysfs_remove() and the devres
 #           teardown follow under the device lock, and amdgpu's "ttm finalized"
@@ -154,7 +173,7 @@ wait_amdgpu_settled() {
     if amdgpu_probe_settled; then
       streak=$(( streak + 1 ))
       if amdgpu_probe_ended \
-         && { [ "$probe_end" = bound ] || [ "$streak" -ge "$SETTLE_STABLE_FAILED" ]; }; then
+         && { [ "$probe_end" != failed ] || [ "$streak" -ge "$SETTLE_STABLE_FAILED" ]; }; then
         log "amdgpu probe ended ($probe_end), settled after $(( i / 10 )).$(( i % 10 ))s"
         return 0
       fi
@@ -196,8 +215,9 @@ wait_amdgpu_settled() {
 # device, so there is nothing left to wait for.  The 1s sleeps that used to
 # follow cost 2s of display-manager start on every boot that needed a reset.
 pci_remove_rescan() {
-  # Probe failures logged from here on belong to the probe the rescan starts.
+  # Probe lines logged from here on belong to the probe the rescan starts.
   fail_baseline=$(probe_fail_count)
+  fbdev_baseline=$(probe_fbdev_count)
   for dev in /sys/bus/pci/devices/0000:ADDR.{1,0}; do
     if [ -e "$dev" ]; then
       if [[ "$dev" == *".1" ]]; then
@@ -259,7 +279,8 @@ fi
 # check before this: a render node seen once only means drm_dev_register() ran,
 # and the probe can still fail after it and unregister the node (see
 # amdgpu_probe_settled).  Skipping on that sighting would leave the GPU dead
-# with no reset.  On a healthy boot the udev bind record ends the wait at once.
+# with no reset.  On a healthy boot the fbdev line or the udev bind record
+# ends the wait at once.
 wait_amdgpu_settled || exit 1
 skip_if_cold_probe_ok
 
