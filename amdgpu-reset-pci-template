@@ -22,8 +22,10 @@ gpu_render_node() {
 # be about to probe the device, so an unbound device proves nothing yet.
 amdgpu_module_live() {
   [ -d /sys/module/amdgpu ] || return 1
+  local state
   [ -e /sys/module/amdgpu/initstate ] || return 0
-  [ "$(cat /sys/module/amdgpu/initstate)" = live ]
+  read -r state </sys/module/amdgpu/initstate
+  [ "$state" = live ]
 }
 
 # True if the driver core has this device parked on its deferred-probe list.
@@ -78,9 +80,11 @@ amdgpu_probe_settled() {
 # Sets probe_end to which one:
 #   bound   udev has processed the "bind" uevent, which driver_bound() sends
 #           only after amdgpu_pci_probe() returned 0; 99-amdgpu-t2.rules
-#           records it as AMDGPU_WARMFIX_BOUND=1.  Not udev's DRIVER=: that
-#           comes from dev->driver, which really_probe() sets before calling
-#           the probe, so any uevent during the probe carries it too.
+#           records it as AMDGPU_WARMFIX_BOUND=1 and clears it on "unbind",
+#           so a record left by an earlier binding cannot pass for this one.
+#           Not udev's DRIVER=: that comes from dev->driver, which
+#           really_probe() sets before calling the probe, so any uevent during
+#           the probe carries it too.
 #   fbdev   the kernel logged "[drm] fbN: ... frame buffer device" for this
 #           function.  amdgpu_pci_probe() sets up fbdev after every step that
 #           can fail it; only debugfs (a failure is logged, not returned) and
@@ -90,20 +94,23 @@ amdgpu_probe_settled() {
 #           survives switch-root, which the bind record does not.
 #   failed  the driver core logged "probe with driver amdgpu failed", which it
 #           does once amdgpu_pci_probe() has returned.
-# Kernel log lines count only if logged since the last `remove` (the
-# baselines): the cold probe's lines are still in the buffer after a rescan.
-# dmesg, not the journal: journald ingests the kernel log in bursts.  If the
-# ring buffer has wrapped, a count stays at its baseline and the plain settle
-# streak decides, as it did before these signals.
-fail_baseline=0
-fbdev_baseline=0
+# A kernel log line counts only if it is the last probe event logged for this
+# function: every probe that gets past the vga_switcheroo deferral logs
+# "initializing kernel modesetting" first, so lines from an earlier probe (the
+# cold one, before a rescan, or before a rebind) are followed by a newer start
+# and no longer count.  The window before a new probe logs its start is
+# covered by amdgpu_probe_settled(): DRM nodes or a missing driver link must
+# hold as well.
+# dmesg, not the journal: journald ingests the kernel log in bursts.  If dmesg
+# cannot be read, no kernel-log signal fires and the plain settle run decides.
 probe_end=""
-probe_fail_count() {
-  dmesg 2>/dev/null | grep -cF -- "${GPU_VGA##*/}: probe with driver amdgpu failed" || true
-}
-probe_fbdev_count() {
-  dmesg 2>/dev/null | grep -F -- "${GPU_VGA##*/}: [drm] fb" \
-    | grep -cF -- " frame buffer device" || true
+kmsg_last_probe_event() {
+  dmesg 2>/dev/null | awk -v dev="${GPU_VGA##*/}: " '
+    !index($0, dev)                                       { next }
+    index($0, "initializing kernel modesetting")          { e = "start"; next }
+    index($0, dev "[drm] fb") && index($0, " frame buffer device") { e = "fbdev"; next }
+    index($0, "probe with driver amdgpu failed")          { e = "failed" }
+    END { print e }' || true
 }
 amdgpu_probe_ended() {
   local props
@@ -111,16 +118,26 @@ amdgpu_probe_ended() {
     props=$(udevadm info -q property -p "$GPU_VGA" 2>/dev/null) || props=""
     if [[ $'\n'"$props"$'\n' == *$'\n'AMDGPU_WARMFIX_BOUND=1$'\n'* ]]; then
       probe_end=bound
-    elif [ "$(probe_fbdev_count)" -gt "$fbdev_baseline" ]; then
+    elif [ "$(kmsg_last_probe_event)" = fbdev ]; then
       probe_end=fbdev
     else
       return 1
     fi
   else
-    [ "$(probe_fail_count)" -gt "$fail_baseline" ] || return 1
+    [ "$(kmsg_last_probe_event)" = failed ] || return 1
     probe_end=failed
   fi
 }
+
+# Monotonic clock in centiseconds, without forking: /proc/uptime is
+# CLOCK_BOOTTIME, which an NTP step at boot does not move.
+uptime_cs() {
+  local up _
+  read -r up _ </proc/uptime
+  now=$(( 10#${up/./} ))
+}
+# secs CENTISECONDS — "12.3"
+secs() { printf '%d.%d' $(( $1 / 100 )) $(( $1 % 100 / 10 )); }
 
 # Never issue a PCI remove while amdgpu_pci_probe() is in flight.  The write to
 # `remove` blocks on the device lock the probe holds, then lands straight on the
@@ -145,7 +162,7 @@ amdgpu_probe_ended() {
 # D (oops) taint, give up after 15s instead of 60s.
 #
 # "Settled" must hold for a run of consecutive polls, not one.  With no end
-# signal the run is SETTLE_STABLE polls (~1.5s).  That covers the gap the
+# signal the run is SETTLE_HOLD (1.5s).  That covers the gap the
 # single-shot test cannot see: a deferred device sits on neither list between
 # deferred_probe_work_func() taking it off the active list and
 # driver_sysfs_add(); and a probe that fails after drm_dev_register()
@@ -159,47 +176,57 @@ amdgpu_probe_ended() {
 #           and the skip that normally follows writes nothing.  A `remove`
 #           (AMDGPU_WARMFIX_ALWAYS_RESET) waits on the device lock until the
 #           probe returns, then unbinds a fully probed device.
-#   failed  still SETTLE_STABLE_FAILED polls (~0.5s).  The line is logged
+#   failed  still SETTLE_HOLD_FAILED (0.5s).  The line is logged
 #           before really_probe() is done: driver_sysfs_remove() and the devres
 #           teardown follow under the device lock, and amdgpu's "ttm finalized"
 #           from that teardown landed 25ms after the line.  A `remove` in that
 #           window is the crash described above.
-SETTLE_STABLE=16
-SETTLE_STABLE_FAILED=6
+# Times are in centiseconds from uptime_cs, so the deadlines hold however long
+# each poll's checks take; counting polls drifted by their fork overhead.
+SETTLE_HOLD=150
+SETTLE_HOLD_FAILED=50
 wait_amdgpu_settled() {
-  local i limit=600 streak=0
+  local now t0 deadline since="" tainted oops=0
   [ -e "$GPU_VGA" ] || return 0
-  for i in $(seq 1 600); do
+  probe_end=""
+  uptime_cs; t0=$now; deadline=$(( t0 + 6000 ))
+  while :; do
+    uptime_cs
     if amdgpu_probe_settled; then
-      streak=$(( streak + 1 ))
-      if amdgpu_probe_ended \
-         && { [ "$probe_end" != failed ] || [ "$streak" -ge "$SETTLE_STABLE_FAILED" ]; }; then
-        log "amdgpu probe ended ($probe_end), settled after $(( i / 10 )).$(( i % 10 ))s"
+      [ -n "$since" ] || since=$now
+      # Once seen, an end signal stands while the state stays settled: a new
+      # probe would first break it (driver link back, or DRM nodes gone).
+      [ -n "$probe_end" ] || amdgpu_probe_ended || true
+      if [ -n "$probe_end" ] && { [ "$probe_end" != failed ] \
+           || (( now - since >= SETTLE_HOLD_FAILED )); }; then
+        log "amdgpu probe ended ($probe_end), settled after $(secs $(( now - t0 )))s"
         return 0
       fi
-      if [ "$streak" -ge "$SETTLE_STABLE" ]; then
-        log "amdgpu probe settled after $(( i / 10 )).$(( i % 10 ))s (no end signal seen)"
+      if (( now - since >= SETTLE_HOLD )); then
+        log "amdgpu probe settled after $(secs $(( now - t0 )))s (no end signal seen)"
         return 0
       fi
     else
-      streak=0
+      since="" probe_end=""
     fi
-    if (( $(cat /proc/sys/kernel/tainted) & 128 )) && [ "$limit" -eq 600 ]; then
-      limit=$(( i + 150 ))
+    read -r tainted </proc/sys/kernel/tainted
+    if (( tainted & 128 )) && (( ! oops )); then
+      oops=1
+      (( now + 1500 < deadline )) && deadline=$(( now + 1500 ))
     fi
-    [ "$i" -ge "$limit" ] && break
+    (( now >= deadline )) && break
     sleep 0.1
   done
   if ! amdgpu_module_live; then
-    log "ERROR — amdgpu module not loaded after $(( i / 10 ))s; nothing for a reset to re-probe"
+    log "ERROR — amdgpu module not loaded after $(secs $(( now - t0 )))s; nothing for a reset to re-probe"
     return 1
   fi
   if amdgpu_probe_deferred; then
-    log "ERROR — amdgpu probe of $GPU_VGA still deferred after $(( i / 10 ))s (apple_gmux not bound?)"
+    log "ERROR — amdgpu probe of $GPU_VGA still deferred after $(secs $(( now - t0 )))s (apple_gmux not bound?)"
     return 1
   fi
-  log "ERROR — amdgpu probe of $GPU_VGA never settled (after $(( i / 10 ))s)"
-  if (( $(cat /proc/sys/kernel/tainted) & 128 )); then
+  log "ERROR — amdgpu probe of $GPU_VGA never settled (after $(secs $(( now - t0 )))s)"
+  if (( oops )); then
     log "kernel is oops-tainted: probe worker likely died holding the device lock; check: journalctl -k -b | grep -B5 -A40 Oops"
   fi
   log "skipping PCI remove — the write would block forever on the device lock"
@@ -215,9 +242,6 @@ wait_amdgpu_settled() {
 # device, so there is nothing left to wait for.  The 1s sleeps that used to
 # follow cost 2s of display-manager start on every boot that needed a reset.
 pci_remove_rescan() {
-  # Probe lines logged from here on belong to the probe the rescan starts.
-  fail_baseline=$(probe_fail_count)
-  fbdev_baseline=$(probe_fbdev_count)
   for dev in /sys/bus/pci/devices/0000:ADDR.{1,0}; do
     if [ -e "$dev" ]; then
       if [[ "$dev" == *".1" ]]; then
@@ -239,8 +263,8 @@ pci_remove_rescan() {
 # new probe runs (~3.7s on iMac20,2), so the node is usually there on the first
 # poll; time is therefore reported from the start of the rescan, not the poll.
 wait_for_gpu() {
-  local i node ms
-  for i in $(seq 0 100); do
+  local node ms
+  for _ in $(seq 0 100); do
     if node=$(gpu_render_node); then
       ms=$(( (${EPOCHREALTIME//[!0-9]/} - rescan_start_us) / 1000 ))
       log "GPU ready $(( ms / 1000 )).$(( ms % 1000 / 100 ))s after rescan: $node"

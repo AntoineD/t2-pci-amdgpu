@@ -26,6 +26,10 @@ SUBSYSTEM=="drm", DRIVERS=="amdgpu", \
 # driver_bound() sends "bind" only after amdgpu_pci_probe() has returned 0, so
 # this marks the true end of the probe.  udev's DRIVER= property cannot:
 # really_probe() sets the driver before the probe runs, so any uevent during
-# the probe carries DRIVER=amdgpu too.  Removing the device drops the record.
+# the probe carries DRIVER=amdgpu too.  Removing the device drops the record;
+# unbinding must clear it, because udev keeps a device's recorded properties
+# across later events, and a stale record would pass a rebind's probe, still
+# running, for a finished one.
 ACTION=="bind", SUBSYSTEM=="pci", DRIVER=="amdgpu", \
   ENV{AMDGPU_WARMFIX_BOUND}="1"
+ACTION=="unbind", SUBSYSTEM=="pci", ENV{AMDGPU_WARMFIX_BOUND}=""

@@ -122,7 +122,7 @@ fi
 # the journal: the 256 KB printk buffer has wrapped long before a long uptime ends.
 echo
 say "ACPI overrides from /boot/acpi_override.img:"
-acpi_log=$(grep -E '^ACPI: SSDT .*(GFXALT|TbtOnPCH)' <<<"$klog")
+acpi_log=$(grep -E '^ACPI: SSDT 0x[0-9A-Fa-f]+ .*(GFXALT|TbtOnPCH)' <<<"$klog")
 if [[ -z "$klog" ]]; then
   warn "Kernel journal not readable — ACPI overrides not checked"
 elif grep -q 'GFXALT' <<<"$acpi_log"; then
