@@ -225,14 +225,7 @@ When the cold probe failed, the warmfix resets the GPU:
 [amdgpu-warmfix] rescanning PCI bus
 [amdgpu-warmfix] GPU ready X.Xs after rescan: /dev/dri/renderD128
 [amdgpu-warmfix] Stage 2: GPU initialized successfully
-[amdgpu-warmfix] audio function /sys/bus/pci/devices/0000:03:00.1 lost its BAR in the GPU reset — re-enumerating it
-[amdgpu-warmfix] audio function re-enumerated, BAR restored
 ```
-
-The last two lines restore the GPU's HDMI/DP audio. The reset of the GPU
-also wipes its audio function's configuration, and amdgpu restores only the
-VGA function's, so without this step the HDMI/DP outputs have no sound after
-a reset.
 
 The first line says what ended the wait for amdgpu's probe: `fbdev` (the
 kernel logged amdgpu's framebuffer), `bound` (udev saw the driver bind) or
