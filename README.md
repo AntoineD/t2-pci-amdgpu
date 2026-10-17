@@ -301,7 +301,10 @@ naming `apple_bce` fails hard. Re-run `sudo ./install.sh` to refresh the unit.
 them there (`journalctl -u t2fanrd -b`) rather than assuming a figure. On
 iMac20,2 under the 7.2 t2 kernels, cold-boot starts log `max_speed: 2700`,
 but some later restarts (after a resume, or by `install.sh`) have logged 3600.
-`fan1_max` reads whatever the running daemon logged.
+`fan1_max` reads whatever the running daemon logged. With 2700 the fan stops
+~900 RPM short of what the SMC allows under all-core load. Current T2FanRD
+reads the limit only from the SMC; a `max_speed=` line in `/etc/t2fand.conf`
+needs a build that supports it, and the packaged one ignores it.
 
 **Fans spinning at full speed:**
 T2 kernel patches not active — check the T2Linux patched kernel is installed and

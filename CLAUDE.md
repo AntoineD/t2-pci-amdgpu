@@ -116,7 +116,8 @@ all 157 starts from 2026-08-25 to 2026-10-12 21:13 logged `max_speed: 2700`,
 post-resume restarts included. From the `install.sh` run at 2026-10-12 21:14 on,
 five starts logged 3600 instead — installer `try-restart`s and a
 `t2fanrd-resume` restart — and `fan1_max` then reads 3600 with `fan1_manual=1`;
-every cold-boot start still logs 2700. Cause unknown. So neither "always 2700"
+every cold-boot start still logs 2700 (the packaged build too: 7 of 7 cold boots on
+2026-10-17, while its later restarts in a boot logged 3600). Cause unknown. So neither "always 2700"
 nor "3600 once the daemon holds the fan" holds. The 3600 figures in the curve
 section above were measured 2026-07.
 
@@ -124,7 +125,19 @@ The 2700 cap is the daemon's alone. It reads `fan1_min`/`fan1_max` once, at
 startup, and clamps every write to them. With the daemon stopped,
 `fan1_manual=1` and `fan1_output=3600`, the SMC spun the fan to 3575–3668 RPM
 while `fan1_max` read 2700 (2026-10-17). Under all-core load the fan therefore
-stops ~900 RPM short of what the SMC allows. A fix belongs in T2FanRD.
+stops ~900 RPM short of what the SMC allows.
+
+Fixed in T2FanRD, not here: branch `fan-limits-gpu-sensor` in `~/Dev/T2FanRD`
+(not upstream) adds optional `min_speed`/`max_speed` keys to `[FanN]` in
+`/etc/t2fand.conf`, overriding what sysfs reports. On iMac20,2 it runs as
+`/usr/local/bin/t2fanrd-dev` through
+`/etc/systemd/system/t2fanrd.service.d/90-dev.conf`, which overrides
+`ExecStart=` from this repo's `10-` drop-in; neither file is installed or
+removed by this repo. With `max_speed=3600` it logged 3600 on every start,
+the 2026-10-17 cold boot included, and an all-core burst ran the fan at
+3551–3667 RPM. The packaged build ignores the key. `install.sh`'s fan-config
+verdict looks only at the band, `speed_curve` and `always_full_speed`, so it
+keeps the extra line, but a rewrite (legacy band, `--force-fan-conf`) drops it.
 
 ## Fan control across suspend
 
@@ -226,7 +239,7 @@ unit's `modprobe` is normally a no-op. It is kept as insurance, not as the path.
   `enable_service` asks systemd for `LoadState` rather than requiring a file in `/etc`. Without the package, the bundled binary (a pre-April-2026 build that floods the journal with `ESC[1KSetting fan speed` lines) and the full unit are installed as before. Both builds glob `/sys/devices/pci*/*/*/*/APP0001:00/fan*`, which matches here through `firmware_node/subsystem/devices`.
   Measured 2026-10-17 after the switch:
   - The package build logs its parsed config at start, then nothing (0 bytes during a load burst).
-  - It also reads `fan1_max` once. Its start after `install.sh` logged `max_speed: 3600`; whether cold-boot starts still read 2700 is unchecked.
+  - It also reads `fan1_max` once. Its start after `install.sh` logged `max_speed: 3600`, but every cold-boot start logged 2700 (7 of 7 on 2026-10-17).
   - It responds faster: in an 8-thread burst at 85 °C it went 1200 → 2146 RPM in 6 s and to 2588 RPM by 10 s, where the bundled build reached 1581.
   - Stopping the unit still writes `fan1_manual=0`.
 - `10-amdgpu-warmfix.conf` uses `force_drivers` (not `add_drivers`) to guarantee early module loading in initramfs. On T2 the early load buys no early KMS: amdgpu takes 3.3 s of CPU in `dracut-pre-udev` (blocking udev and the NVMe root disk), then defers its probe until `apple_gmux` binds in the real root (6.9–7.1 s). Do **not** add `apple_gmux` to move the probe into the initramfs. Tried 2026-10-13 on iMac20,2, 7 boots: the cold probe failed on 6 (about half before). The initramfs held switch-root until the failing probe ended (5.6 → 7.6 s), so gdm came no earlier. The re-probe took 4.3 s instead of 3.6 s, and Plymouth lost its splash. One boot failed the re-probe too, then the retry (`invalid ip discovery binary signature`) left the screen black. Consequence: any name that does not resolve to a real `.ko` is a **fatal** `dracut -f` error, not a warning. `pcieport` was listed here and broke `dracut -f` outright — the PCIe port driver is compiled into the PCI core (`CONFIG_PCIEPORTBUS=y`), so it is neither a module nor a `modules.builtin` entry. Check any addition with `modinfo -n <name>` before committing it.
