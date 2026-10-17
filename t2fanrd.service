@@ -10,9 +10,11 @@ Type=simple
 # a hard ExecStartPre failure fails the unit, Restart=always loops it forever,
 # and the SMC silently keeps driving the fan on its own much louder curve.
 # The real gate is the sysfs wait below, not these modprobes.
-ExecStartPre=-/usr/sbin/modprobe t2bce_core
-ExecStartPre=-/usr/sbin/modprobe apple_bce
-ExecStartPre=-/usr/sbin/modprobe applesmc
+# -q: one name is always missing, and without it modprobe logs "FATAL: Module
+# ... not found" every boot.  It still exits non-zero; "-" ignores that.
+ExecStartPre=-/usr/sbin/modprobe -q t2bce_core
+ExecStartPre=-/usr/sbin/modprobe -q apple_bce
+ExecStartPre=-/usr/sbin/modprobe -q applesmc
 # Wait for the exact attribute t2fanrd opens, not for the whole udev queue.
 # On failure the unit fails and Restart=always retries in RestartSec.
 ExecStartPre=/usr/local/bin/t2-wait-sysfs.sh -t 15 \

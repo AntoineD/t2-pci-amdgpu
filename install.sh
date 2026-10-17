@@ -241,7 +241,8 @@ else
   acpi_dir="$tmpdir/kernel/firmware/acpi"
   mkdir -p "$acpi_dir"
   if [[ -f "${SRC_DIR}/GFXALT-multi.aml" ]]; then
-    cp "${SRC_DIR}/GFXALT-multi.aml" "$acpi_dir/"
+    # Fixed mode: cpio records it, so the checkout's mode would change the image.
+    install -m0644 "${SRC_DIR}/GFXALT-multi.aml" "$acpi_dir/"
   else
     warn "GFXALT-multi.aml not found — GPU ACPI override left out (required for GPU fix)"
   fi

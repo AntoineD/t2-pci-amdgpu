@@ -16,6 +16,7 @@ The layers must execute in this order; each depends on the previous:
    The cpio **must be uncompressed**: `acpi_table_upgrade()` scans the raw initrd before decompression, so a gzipped archive is skipped without any error. Installers before 2026-10 gzipped it, and no journaled boot on iMac20,2 (2026-08-24 onward) ever loaded the table. Proof it loaded is an `ACPI: SSDT … (v02 LH GFXALT …)` line in `journalctl -k -b`. The old `dmesg | grep "Early table override"` check matched a message current kernels no longer print, so it could never confirm anything. `install.sh` rebuilds a gzip image (magic `1f8b`) even when it is newer than the `.aml`.
 
 2. **modprobe.d** (`amdgpu.conf`): Sets `amdgpu.aspm=0` and `amdgpu.runpm=0` at module level, blacklists `radeon`, and sets `snd_hda_intel.power_save_controller=0`. Duplicates GRUB cmdline params intentionally — survives rescue boots that bypass GRUB.
+   Neither `amdgpu.aspm=0` nor `pcie_aspm=off` turns ASPM off on the GPU link. `amdgpu.aspm=0` only skips amdgpu's own ASPM setup, and `pcie_aspm=off` leaves firmware's configuration alone. Apple's firmware enables L1: `lspci -vv` shows `ASPM L1 Enabled` on 00:01.0, 01:00.0, 02:00.0 and 03:00.0. It also enables L1 on NVMe, T2 and Ethernet; only the Thunderbolt chain has it off. Turning it off for real does not cure the cold-probe failure. Tested 2026-10-17 with `pcie_aspm.policy=performance`, which works here because the kernel skips `_OSC` on Apple and assumes PCIe control (`OS assumes control of [...]`). lspci confirmed `ASPM Disabled` on every GPU link, and the cold probe still failed with `SMU: No response msg_reg: 6`. Dropping `pcie_aspm=off` saves no power either: with `CONFIG_PCIEASPM_DEFAULT=y` the kernel keeps firmware's settings.
 
 3. **udev rules**:
    - `99-amdgpu-t2.rules`: Pins `power/control=on` for AMD VGA (class `0x030000`) and HDMI audio (class `0x040300`) at device bind, before the driver claims the device. Also pins DPM to `low` after the driver loads for thermal stability, and records amdgpu's `bind` uevent as `AMDGPU_WARMFIX_BOUND=1`, the warmfix's signal that the probe returned success.
@@ -55,8 +56,20 @@ package still sat at 93 °C mean / 100 °C peak *with the fan at 3600* — the c
 cannot hold this CPU lower at any RPM, so ending the curve below ~90 °C only buys
 noise. Hence the 60/90 default.
 
-There is no smoothing, averaging or hysteresis — `calc_speed()` is a pure function
-of the instantaneous package temperature, which slews 47 → 86 °C in one second.
+The daemon does smooth. `calc_speed()` itself is a pure function, but upstream
+has fed it the mean of the last 50 temperature samples since November 2023, not
+the instantaneous package temperature, which slews 47 → 86 °C in one second.
+Measured 2026-10-17 with the bundled binary:
+- An 8 s, 8-thread burst took the package 41 → 81 °C. `fan1_output` stayed at
+  1200 for ~4.5 s, then rose 1203 → 1581 while the temperature held at 80–81 °C,
+  and was back at 1200 ~4 s after the load stopped.
+- A 3 s burst to 76 °C left it at 1200. With no smoothing the curve gives ~1427 RPM.
+
+Upstream also reads the GPU's `/sys/class/drm/card0/device/hwmon/hwmon*/temp1_input`
+and uses the higher of the two, but globs both sensors once, at startup. At
+~8 s amdgpu has not registered yet, and on probe-OK boots it gets DRM minor 1, not
+0. So the GPU temperature never reaches the curve at boot. That is harmless while
+DPM is pinned `low` (GPU ~40 °C).
 
 `install.sh` **reconciles** an existing `/etc/t2fand.conf` rather than skipping it.
 Skipping is what let a 55/75 band survive every re-install for months. Bands this
@@ -92,6 +105,12 @@ five starts logged 3600 instead — installer `try-restart`s and a
 every cold-boot start still logs 2700. Cause unknown. So neither "always 2700"
 nor "3600 once the daemon holds the fan" holds. The 3600 figures in the curve
 section above were measured 2026-07.
+
+The 2700 cap is the daemon's alone. It reads `fan1_min`/`fan1_max` once, at
+startup, and clamps every write to them. With the daemon stopped,
+`fan1_manual=1` and `fan1_output=3600`, the SMC spun the fan to 3575–3668 RPM
+while `fan1_max` read 2700 (2026-10-17). Under all-core load the fan therefore
+stops ~900 RPM short of what the SMC allows. A fix belongs in T2FanRD.
 
 ## Fan control across suspend
 

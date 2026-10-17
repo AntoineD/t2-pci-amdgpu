@@ -6,8 +6,9 @@ After=systemd-udevd.service
 Type=oneshot
 # Renamed apple_bce -> t2bce_core in the 7.1 t2 kernel (drivers/staging/t2bce).
 # Try both, tolerant: a hard failure here fails the unit and takes applesmc with it.
-ExecStartPre=-/usr/sbin/modprobe t2bce_core
-ExecStartPre=-/usr/sbin/modprobe apple_bce
+# -q keeps the missing one from logging "FATAL: Module ... not found" every boot.
+ExecStartPre=-/usr/sbin/modprobe -q t2bce_core
+ExecStartPre=-/usr/sbin/modprobe -q apple_bce
 # Wait for the T2 bridge's probe to get somewhere, not for the whole udev
 # coldplug queue to drain.  The driver-dir link (drivers/<drv>/0000:*) is NOT
 # that signal: driver_sysfs_add() creates it before probe() runs, the same trap

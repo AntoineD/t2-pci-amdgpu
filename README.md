@@ -15,7 +15,7 @@ The fix operates in five layers, from earliest to latest in the boot sequence:
 | Layer | What | When | Why |
 | --- | --- | --- | --- |
 | **ACPI override** | Injects `_PR3`/`_DSM` stubs into the GPU ACPI device | Early initrd (before kernel) | Apple's ACPI tables omit the power-resource and device-specific methods the Linux AMDGPU driver expects; without them the PCI link comes up in an undefined state and the driver fails to initialize |
-| **modprobe.d** | Sets `amdgpu.aspm=0`, `amdgpu.runpm=0`, `snd_hda_intel.power_save_controller=0`, blacklists `radeon` | Module load | Persists ASPM-off and disables runtime power management so neither GPU function can be powered down after its driver claims it; blacklisting `radeon` prevents it from racing `amdgpu` |
+| **modprobe.d** | Sets `amdgpu.aspm=0`, `amdgpu.runpm=0`, `snd_hda_intel.power_save_controller=0`, blacklists `radeon` | Module load | Keeps amdgpu from setting up ASPM itself and disables runtime power management, so neither GPU function can be powered down after its driver claims it; blacklisting `radeon` prevents it from racing `amdgpu`. Neither this nor `pcie_aspm=off` turns off the ASPM L1 that Apple's firmware enables on the GPU link |
 | **udev rule** | Pins GPU PCI functions to `power/control=on`; sets DPM to `low` | Device bind / driver load | PCIe runtime PM can suspend the GPU between the ACPI fix and the driver binding; pinning the power state to `on` closes that window. DPM `low` prevents thermal crashes on T2 hardware. |
 | **Warmfix service** | PCI remove → rescan with retry + readiness check; skipped when amdgpu's cold probe already succeeded | systemd, before display manager | Forcing the PCI bus to re-enumerate the GPU slot makes the kernel re-read its BARs and re-run PCI init cleanly; the retry handles the ~15 s corruption case where the first init attempt fails |
 | **DM drop-in** | Ensures display manager starts only after warmfix | systemd ordering | Without explicit ordering, GDM can race the warmfix and start against an uninitialised GPU, producing a black screen or failed compositor |
@@ -434,6 +434,6 @@ before suspending; each device then logs `calling …` / `… returned 0 after N
 
 ## Notes
 
-- Developed on Fedora 43, iMac20,2 (legacy BIOS boot).
+- Developed on Fedora 43, iMac20,2 (EFI boot).
 - Should work on other T2 Macs with AMD GPUs — feedback welcome.
-- `t2fanrd` binary: SHA256 `32612f571e8de56497c7c36dc32b4f6ba85cd25888afd5bb25c6de735f5fe52f` — verify against [GnomedDev/T2FanRD releases](https://github.com/GnomedDev/T2FanRD/releases) before running.
+- `t2fanrd` binary: SHA256 `32612f571e8de56497c7c36dc32b4f6ba85cd25888afd5bb25c6de735f5fe52f`, built with rustc 1.87.0 from [GnomedDev/T2FanRD](https://github.com/GnomedDev/T2FanRD) before its April 2026 fixes. Upstream publishes no releases or tags, so there is nothing to check the hash against. On Fedora, the t2linux COPR packages a newer build as `t2fanrd` (`/usr/bin/t2fanrd`); this repo's copy in `/usr/local/bin` takes precedence over it.
