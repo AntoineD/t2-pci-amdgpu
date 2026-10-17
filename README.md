@@ -68,6 +68,7 @@ device a given unit needs is present. Each unit now waits on its own preconditio
 | File | Installed to | Description |
 | --- | --- | --- |
 | `amdgpu.conf` | `/etc/modprobe.d/` | Sets `amdgpu.aspm=0` and `amdgpu.runpm=0` at module level; blacklists `radeon`; sets `snd_hda_intel.power_save_controller=0` so the GPU's HDMI audio function stays out of runtime suspend |
+| `amdgpu-navi10-imac.conf` | `/etc/modprobe.d/` | Only on iMac20,x with a Navi 10 GPU (Radeon Pro 5700 / 5700 XT). Sets `amdgpu.ppfeaturemask=0xfff7bffd`, which keeps memory-clock scaling out of the power-management controller's start-up request. Without it, that controller hangs on most cold boots, and the GPU only came up after the warmfix's reset, ~6 s later and without HDMI/DP audio. With it, 9 of 9 cold boots came up first time. Cost: the memory clock cannot scale up under load. |
 | `99-amdgpu-t2.rules` | `/etc/udev/rules.d/` | Pins the AMD VGA function to `power/control=on` at device bind; sets DPM to `low`; records amdgpu's successful bind (`AMDGPU_WARMFIX_BOUND=1`) so the warmfix can stop waiting for the probe. Also targets the HDMI audio function, but that write is best-effort — `snd_hda_intel` resets it to `auto` when it binds, which is why the module option above exists |
 | `99-t2-usb.rules` | `/etc/udev/rules.d/` | Pins USB root hubs (`idVendor=1d6b`, hub class `09`) to `power/control=on`. T2 xHCI hubs autosuspend aggressively and stop reporting device attach events; pinning the root hubs awake fixes USB-to-Ethernet adapters and similar devices not appearing in `lsusb`. |
 | `99-t2-wifi-off.rules` | `/etc/udev/rules.d/` | Only with `install.sh --disable-wifi`. Removes the Wi-Fi (ACPI `ARPT`) and its root port from the PCI tree at boot, so Apple's 1 s link waits on that port no longer run on every suspend and resume. Bluetooth is unaffected — it is on the UART. |
@@ -422,6 +423,8 @@ before suspending; each device then logs `calling …` / `… returned 0 after N
 
 ## Known issues
 
+- On iMac20,x with a Navi 10 GPU the installer keeps memory-clock scaling off (`amdgpu-navi10-imac.conf`) so the GPU starts reliably. The memory clock then stays at its boot level, which limits games and compute.
+- On a boot where the warmfix has to reset the GPU, HDMI/DP audio is lost until the next boot: the reset wipes the GPU's audio function. With the setting above this should no longer happen on Navi 10 iMacs.
 - On first-attempt GPU init failure, the screen may show a horizontal corruption artifact for ~15–20 seconds. The warmfix retries automatically and the driver loads correctly.
 - After such an event, rebooting into macOS may trigger 1–2 crash reports (`remoted` watchdog) and one automatic reboot within the first 5 minutes. macOS then runs normally.
 - Maximum resolution is 4K — 5K is not supported by `amdgpu`.

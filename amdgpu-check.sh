@@ -181,6 +181,19 @@ else
   else
     warn "DPM level: ${dpm:-unknown} — 99-amdgpu-t2.rules pins it to low"
   fi
+  # Navi 10 iMac20,x boards need memory-clock DPM kept out of SMU init
+  # (amdgpu-navi10-imac.conf); without it most cold probes fail.
+  ids="$(cat "$gpu_dev/device" "$gpu_dev/subsystem_vendor" "$gpu_dev/subsystem_device" 2>/dev/null | tr '\n' ':')"
+  case "$ids" in
+    0x731b:0x106b:0x021a:|0x7319:0x106b:0x021b:)
+      mask=$(cat /sys/module/amdgpu/parameters/ppfeaturemask 2>/dev/null)
+      if [[ -n "$mask" ]] && (( (mask & 0x2) == 0 )); then
+        ok  "ppfeaturemask=$mask: memory-clock DPM kept out of SMU init (Navi 10 iMac)"
+      else
+        warn "ppfeaturemask=${mask:-unknown} includes memory-clock DPM — cold probes on this board mostly fail; re-run install.sh and rebuild the initramfs"
+      fi
+      ;;
+  esac
   clocks=""
   for f in sclk mclk; do
     cur=$(grep -m1 '\*' "$gpu_dev/pp_dpm_$f" 2>/dev/null | awk '{print $2}')

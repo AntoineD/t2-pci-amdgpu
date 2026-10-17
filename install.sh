@@ -370,6 +370,26 @@ fi
 # ---------------------------------------------------------------------------
 if ! (( DRY_RUN )); then mkdir -p /etc/modprobe.d /etc/udev/rules.d "$DRACUT_DIR"; fi
 install_file "${SRC_DIR}/amdgpu.conf"               "/etc/modprobe.d/amdgpu.conf"
+# Navi 10 iMac20,x boards: keep memory-clock DPM out of the SMU's init request,
+# which their SMU hangs on (see amdgpu-navi10-imac.conf).  Matched on the exact
+# device and Apple subsystem IDs: other T2 GPUs keep full memory-clock DPM.
+NAVI10_IMAC_CONF=/etc/modprobe.d/amdgpu-navi10-imac.conf
+navi10_imac=0
+if [[ -n "${slot:-}" ]]; then
+  gpu_ids=""
+  for f in device subsystem_vendor subsystem_device; do
+    gpu_ids+="$(cat "/sys/bus/pci/devices/0000:${slot}.0/$f" 2>/dev/null):"
+  done
+  case "$gpu_ids" in
+    0x731b:0x106b:0x021a:|0x7319:0x106b:0x021b:) navi10_imac=1 ;;
+  esac
+fi
+if (( navi10_imac )); then
+  say "Navi 10 iMac GPU (${gpu_ids%:}): memory-clock DPM kept out of SMU init"
+  install_file "${SRC_DIR}/amdgpu-navi10-imac.conf" "$NAVI10_IMAC_CONF"
+else
+  retire_file "$NAVI10_IMAC_CONF" "not a Navi 10 iMac GPU"
+fi
 install_file "${SRC_DIR}/99-amdgpu-t2.rules"        "/etc/udev/rules.d/99-amdgpu-t2.rules"
 install_file "${SRC_DIR}/99-t2-usb.rules"           "/etc/udev/rules.d/99-t2-usb.rules"
 if (( DISABLE_WIFI )); then
@@ -642,6 +662,7 @@ initramfs_inputs=(
   "${DRACUT_DIR}/20-amdgpu-t2-cmdline.conf"
   /etc/modprobe.d/amdgpu.conf
   /etc/modprobe.d/t2-wifi-off.conf
+  "$NAVI10_IMAC_CONF"
 )
 newest_input=0
 for f in "${initramfs_inputs[@]}"; do

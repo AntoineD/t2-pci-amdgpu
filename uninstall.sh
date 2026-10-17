@@ -169,6 +169,7 @@ done
 # ---------------------------------------------------------------------------
 offer_restore "/etc/modprobe.d/amdgpu.conf"
 offer_restore "/etc/modprobe.d/t2-wifi-off.conf"
+offer_restore "/etc/modprobe.d/amdgpu-navi10-imac.conf"
 offer_restore "/etc/udev/rules.d/99-amdgpu-t2.rules"
 offer_restore "/etc/udev/rules.d/99-t2-usb.rules"
 offer_restore "/etc/udev/rules.d/99-t2-wifi-off.rules"
@@ -266,7 +267,7 @@ stale_initramfs=0
 if command -v lsinitrd &>/dev/null; then
   for img in /boot/initramfs-*.img; do
     [[ -e "$img" ]] || continue
-    for f in etc/modprobe.d/amdgpu.conf etc/modprobe.d/t2-wifi-off.conf; do
+    for f in etc/modprobe.d/amdgpu.conf etc/modprobe.d/t2-wifi-off.conf etc/modprobe.d/amdgpu-navi10-imac.conf; do
       [[ -n "$(lsinitrd -f "$f" "$img" 2>/dev/null)" ]] && stale_initramfs=1
     done
     if [[ "$(lsinitrd -f etc/cmdline.d/20-force_drivers.conf "$img" 2>/dev/null)" == *rd.driver.pre=amdgpu* ]]; then
