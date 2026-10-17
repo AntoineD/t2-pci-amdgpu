@@ -147,6 +147,13 @@ ACPI_IMG="/boot/acpi_override.img"
 STATE_DIR="/var/lib/t2-pci-amdgpu"
 TBT_BIOS_FILE="${STATE_DIR}/TbtOnPCH.bios"
 
+# GRUB_FILE, grub_cfg, boot_mode, REQUIRED_PARAMS, grub_var, has_word,
+# boot_entry_args — shared with uninstall.sh.  Sourced before any change, so a
+# copy missing this file stops here rather than half-installed.
+[[ -f "${SRC_DIR}/t2-grub-common.bash" ]] || { err "Missing ${SRC_DIR}/t2-grub-common.bash"; exit 1; }
+# shellcheck source=t2-grub-common.bash
+source "${SRC_DIR}/t2-grub-common.bash"
+
 require_root
 check_deps
 (( DRY_RUN )) && say "=== DRY RUN — no changes will be made ==="
@@ -499,38 +506,6 @@ rm -f -- "$gen"
 # ---------------------------------------------------------------------------
 say "✅ Installation complete."
 
-GRUB_FILE="${GRUB_FILE:-/etc/default/grub}"   # overridable for testing
-
-# Since Fedora 34 the EFI partition holds only a stub grub.cfg that hands off
-# to /boot/grub2/grub.cfg (it calls `configfile`).  Pointing grub2-mkconfig at
-# the stub overwrites it with a full config that kernel updates never refresh.
-# Write the EFI path only on a system where it really is the config.
-grub_cfg="/boot/grub2/grub.cfg"
-if [[ -d /sys/firmware/efi ]]; then
-  boot_mode="EFI"
-  efi_cfg="/boot/efi/EFI/fedora/grub.cfg"
-  if [[ -r "$efi_cfg" ]] && ! grep -q 'configfile' "$efi_cfg" 2>/dev/null; then
-    grub_cfg="$efi_cfg"
-  fi
-else
-  boot_mode="Legacy BIOS"
-fi
-REQUIRED_PARAMS=(pci=noaer pcie_aspm=off amdgpu.aspm=0 amdgpu.runpm=0)
-
-# grub_var NAME — value of the last NAME= assignment in $GRUB_FILE, unquoted
-grub_var() {
-  local line
-  [[ -f "$GRUB_FILE" ]] || return 0
-  line="$(grep -E "^[[:space:]]*$1=" "$GRUB_FILE" 2>/dev/null | tail -n1)" || true
-  [[ -n "$line" ]] || return 0
-  line="${line#*=}"
-  line="${line%\"}"; line="${line#\"}"
-  line="${line%\'}"; line="${line#\'}"
-  printf '%s' "$line"
-}
-
-# has_word WORD STRING — WORD is one of STRING's whitespace-separated words
-has_word() { [[ " $2 " == *[[:space:]]"$1"[[:space:]]* ]]; }
 
 # cmdline_ok STRING — every REQUIRED_PARAMS word present, amdgpu not disabled
 cmdline_ok() {
@@ -602,26 +577,19 @@ boot_unverified=0
 (( EUID == 0 )) || boot_unverified=1
 
 if (( ! grub_missing && ! boot_unverified )); then
-  [[ "$(grub_var GRUB_ENABLE_BLSCFG)" == "true" ]] && bls=1
+  grub_bls && bls=1
   if (( bls )); then
     [[ "$(grub2-mkconfig --help 2>/dev/null)" == *--update-bls-cmdline* ]] && bls_update=1
-    env_initrd="$(grub2-editenv - list 2>/dev/null | sed -n 's/^early_initrd=//p')" || env_initrd=""
-    [[ "$env_initrd" == *acpi_override.img* ]] || generated_ok=0
+    names_acpi_img "$(grubenv_var early_initrd)" || generated_ok=0
   else
     grep -qs 'acpi_override\.img' "$grub_cfg" || generated_ok=0
   fi
 
-  if command -v grubby &>/dev/null; then
-    while IFS= read -r line; do
-      [[ "$line" == args=* ]] || continue
-      line="${line#args=}"; line="${line#\"}"; line="${line%\"}"
-      note_entry "$line"
-    done < <(grubby --info=ALL 2>/dev/null)
-  elif (( ! bls )) && [[ -r "$grub_cfg" ]]; then
-    while read -r kw rest; do
-      if [[ "$kw" == linux* ]]; then note_entry "$rest"; fi
-    done < "$grub_cfg"
-  fi
+  # BLS: grubby, or the entries themselves when grubby is missing.  Non-BLS:
+  # this system's own grub.cfg entries only, never os-prober's.
+  while IFS= read -r line; do
+    note_entry "$line"
+  done < <(boot_entry_args)
   # Nothing readable is nothing verified.
   (( entries_seen )) || entries_ok=0
 fi
@@ -783,9 +751,17 @@ if (( need_grubby )); then
   echo "${n}. Apply the kernel parameters to every installed kernel — BLS entries"
   echo "   carry their own cmdline and this grub2-mkconfig cannot update them:"
   echo
-  echo "     sudo grubby --update-kernel=ALL --args=\"${REQUIRED_PARAMS[*]}\""
-  (( entries_nomodeset )) && \
-    echo "     sudo grubby --update-kernel=ALL --remove-args=\"nomodeset amdgpu.modeset=0\""
+  if command -v grubby &>/dev/null; then
+    echo "     sudo grubby --update-kernel=ALL --args=\"${REQUIRED_PARAMS[*]}\""
+    (( entries_nomodeset )) && \
+      echo "     sudo grubby --update-kernel=ALL --remove-args=\"nomodeset amdgpu.modeset=0\""
+  else
+    echo "     grubby is not installed.  Install it (sudo dnf install grubby) and re-run"
+    echo "     this installer, or add ${REQUIRED_PARAMS[*]} to the options"
+    echo "     line of each /boot/loader/entries/*.conf by hand."
+    (( entries_nomodeset )) && \
+      echo "     Remove nomodeset and amdgpu.modeset=0 from those lines too."
+  fi
   echo
 fi
 

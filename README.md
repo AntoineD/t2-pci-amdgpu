@@ -33,7 +33,8 @@ table, which takes ~9 s off every resume from suspend — see
 | File | Description |
 | --- | --- |
 | `install.sh` | Main installer — runs all steps below |
-| `uninstall.sh` | Removes all installed files, disables services. Use `--all` to also remove `/boot/acpi_override.img` and `/etc/t2fand.conf`. |
+| `uninstall.sh` | Removes all installed files, disables services, then prints the GRUB and initramfs cleanup steps this system still needs. `--all` also removes `/boot/acpi_override.img` and `/etc/t2fand.conf`, but keeps the image while GRUB still loads it: GRUB loads no initramfs at all when one of its files is missing, and the system would not boot. `--dry-run` previews everything. |
+| `t2-grub-common.bash` | GRUB helpers sourced by both scripts (not installed) |
 | `amdgpu-reset-pci-template` | Template for the PCI reset script; `ADDR` is replaced with the detected slot at install time |
 
 ### Systemd units

@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # uninstall.sh — Remove AMDGPU warmfix components installed by install.sh
 #
-# Usage: sudo ./uninstall.sh [--all]
+# Usage: sudo ./uninstall.sh [--all] [--dry-run]
 #
-#   --all   Also remove /boot/acpi_override.img and /etc/t2fand.conf
-#           (plus the legacy /etc/t2fanrd.conf, which t2fanrd never read)
-#           and /var/lib/t2-pci-amdgpu
+#   --all       Also remove /boot/acpi_override.img and /etc/t2fand.conf
+#               (plus the legacy /etc/t2fanrd.conf, which t2fanrd never read)
+#               and /var/lib/t2-pci-amdgpu.  The image is kept for as long as
+#               GRUB still loads it: see step 6.
+#   --dry-run   Show what would be removed and which steps would remain,
+#               without changing anything
 #
 set -Eeuo pipefail
 
@@ -15,9 +18,33 @@ say()  { printf "\033[1;36m==>\033[0m %s\n" "$*"; }
 warn() { printf "\033[1;33m[!]\033[0m %s\n" "$*"; }
 err()  { printf "\033[1;31m[✗]\033[0m %s\n" "$*" >&2; }
 
+REMOVE_ALL=0
+DRY_RUN=0
+while (( $# )); do
+  case "$1" in
+    --all)     REMOVE_ALL=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    *) err "Unknown option: $1"; exit 1 ;;
+  esac
+  shift
+done
+
+# Root even for --dry-run: grubenv, the boot entries and the initramfs images
+# it has to inspect are all root-only.
+[[ $EUID -eq 0 ]] || { err "Run with sudo/root."; exit 1; }
+
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=t2-grub-common.bash
+source "${SRC_DIR}/t2-grub-common.bash" || { err "Missing ${SRC_DIR}/t2-grub-common.bash"; exit 1; }
+
+ACPI_IMG="/boot/${ACPI_IMG_NAME}"
+
+removed_any=0
 remove_file() {
   [[ -e "$1" ]] || return 0
+  if (( DRY_RUN )); then say "Would remove: $1"; removed_any=1; return 0; fi
   rm -f -- "$1"
+  removed_any=1
   say "Removed: $1"
 }
 
@@ -32,6 +59,12 @@ offer_restore() {
     -name "$(basename "$file").bak.*" -print0 2>/dev/null | sort -z -r)
 
   (( ${#backups[@]} )) || { remove_file "$file"; return 0; }
+
+  if (( DRY_RUN )); then
+    remove_file "$file"
+    say "Would offer ${#backups[@]} backup(s) of $file to restore, newest ${backups[0]##*.bak.}"
+    return 0
+  fi
 
   echo
   say "Found ${#backups[@]} backup(s) for $file:"
@@ -68,11 +101,7 @@ offer_restore() {
   done
 }
 
-[[ $EUID -eq 0 ]] || { err "Run with sudo/root."; exit 1; }
-
-REMOVE_ALL=0
-[[ "${1:-}" == "--all" ]] && REMOVE_ALL=1
-
+(( DRY_RUN )) && say "=== DRY RUN — no changes will be made ==="
 say "AMDGPU warmfix uninstallation"
 
 # ---------------------------------------------------------------------------
@@ -80,12 +109,10 @@ say "AMDGPU warmfix uninstallation"
 # ---------------------------------------------------------------------------
 for svc in amdgpu-warmfix.service t2fanrd-resume.service t2fanrd.service applesmc-late.service; do
   if systemctl is-enabled "$svc" &>/dev/null; then
-    systemctl disable "$svc"
-    say "Disabled: $svc"
+    if (( DRY_RUN )); then say "Would disable: $svc"; else systemctl disable "$svc"; say "Disabled: $svc"; fi
   fi
   if systemctl is-active "$svc" &>/dev/null; then
-    systemctl stop "$svc"
-    say "Stopped: $svc"
+    if (( DRY_RUN )); then say "Would stop: $svc"; else systemctl stop "$svc"; say "Stopped: $svc"; fi
   fi
 done
 
@@ -100,7 +127,9 @@ else
 fi
 offer_restore "${drop_dir}/10-amdgpu-warmfix.conf"
 # Remove the drop-in directory if empty
-rmdir -- "$drop_dir" 2>/dev/null && say "Removed empty dir: $drop_dir" || true
+if ! (( DRY_RUN )); then
+  rmdir -- "$drop_dir" 2>/dev/null && say "Removed empty dir: $drop_dir" || true
+fi
 
 # ---------------------------------------------------------------------------
 # 3) Remove service units
@@ -139,38 +168,188 @@ offer_restore "/etc/dracut.conf.d/20-amdgpu-t2-cmdline.conf"
 
 # ---------------------------------------------------------------------------
 # 6) Optionally remove ACPI image and t2fanrd config
+#
+# The image must outlive every GRUB reference to it.  Fedora's blscfg adds
+# each early_initrd file to the entry's initrd line without checking that it
+# exists, and the x86 EFI `initrd` command loads nothing at all when one file
+# fails to open.  No initramfs means no root filesystem, so deleting the image
+# first leaves a machine that does not boot.
 # ---------------------------------------------------------------------------
+img_refs=()
+initrd_custom="$(grub_var GRUB_EARLY_INITRD_LINUX_CUSTOM)"
+names_acpi_img "$initrd_custom" && \
+  img_refs+=("${GRUB_FILE}: GRUB_EARLY_INITRD_LINUX_CUSTOM=\"${initrd_custom}\"")
+env_initrd="$(grubenv_var early_initrd)"
+names_acpi_img "$env_initrd" && \
+  img_refs+=("GRUB environment (grubenv): early_initrd=${env_initrd}")
+grep -qs "$ACPI_IMG_NAME" "$grub_cfg" && img_refs+=("$grub_cfg")
+for entry in /boot/loader/entries/*.conf; do
+  [[ -r "$entry" ]] || continue
+  grep -qs "^initrd.*${ACPI_IMG_NAME}" "$entry" && img_refs+=("$entry")
+done
+
+img_kept=0
 if (( REMOVE_ALL )); then
-  remove_file "/boot/acpi_override.img"
+  if [[ -e "$ACPI_IMG" ]] && (( ${#img_refs[@]} )); then
+    img_kept=1
+    warn "Kept $ACPI_IMG — GRUB still loads it, from:"
+    printf '      %s\n' "${img_refs[@]}"
+    warn "GRUB loads no initramfs at all when one of its files is missing, and"
+    warn "the system then cannot mount its root filesystem.  Do the steps below,"
+    warn "then run this again with --all to delete the image."
+  else
+    remove_file "$ACPI_IMG"
+  fi
   remove_file "/etc/t2fand.conf"
   # Written by installers before 2026-07; t2fanrd never read it.
   remove_file "/etc/t2fanrd.conf"
   # Firmware version the Thunderbolt patch was made on; meaningless without
   # the image above.
-  if [[ -d /var/lib/t2-pci-amdgpu ]]; then
-    rm -rf -- /var/lib/t2-pci-amdgpu
-    say "Removed: /var/lib/t2-pci-amdgpu"
+  if [[ -d /var/lib/t2-pci-amdgpu ]] && (( ! img_kept )); then
+    if (( DRY_RUN )); then
+      say "Would remove: /var/lib/t2-pci-amdgpu"
+    else
+      rm -rf -- /var/lib/t2-pci-amdgpu
+      say "Removed: /var/lib/t2-pci-amdgpu"
+    fi
   fi
 else
-  warn "Kept /boot/acpi_override.img and /etc/t2fand.conf (use --all to remove)"
+  warn "Kept $ACPI_IMG and /etc/t2fand.conf (use --all to remove)"
 fi
 
 # ---------------------------------------------------------------------------
 # 7) Reload daemons
 # ---------------------------------------------------------------------------
-systemctl daemon-reload
-udevadm control --reload-rules
-say "systemd and udev reloaded"
+if ! (( DRY_RUN )); then
+  systemctl daemon-reload
+  udevadm control --reload-rules
+  say "systemd and udev reloaded"
+fi
 
-# ---------------------------------------------------------------------------
-# Done
-# ---------------------------------------------------------------------------
 say "Uninstallation complete."
-cat <<'EOF'
 
-Remember to:
-  1. Remove GRUB_EARLY_INITRD_LINUX_CUSTOM and amdgpu/pcie params from /etc/default/grub
-  2. Regenerate GRUB config: sudo grub2-mkconfig -o <your grub.cfg>
-  3. Rebuild initramfs:      sudo dracut -f
+# ---------------------------------------------------------------------------
+# Outstanding steps — the exact commands for this system, and only those
+# still needed, so a re-run after doing them prints none.
+# ---------------------------------------------------------------------------
+bls=0
+grub_bls && bls=1
+have_grubby=0
+command -v grubby &>/dev/null && have_grubby=1
 
-EOF
+# Kernel parameters install.sh asked for that are still set somewhere
+present=()
+cmdline_default="$(grub_var GRUB_CMDLINE_LINUX)"
+entry_args="$(boot_entry_args)"
+for p in "${REQUIRED_PARAMS[@]}"; do
+  if has_word "$p" "$cmdline_default" || has_word "$p" "${entry_args//$'\n'/ }"; then
+    present+=("$p")
+  fi
+done
+cmdline_rest=()
+read -ra cmdline_words <<<"$cmdline_default"
+for w in "${cmdline_words[@]}"; do
+  has_word "$w" "${present[*]:-}" || cmdline_rest+=("$w")
+done
+
+# Images still carrying this project's dracut or modprobe config
+stale_initramfs=0
+if command -v lsinitrd &>/dev/null; then
+  for img in /boot/initramfs-*.img; do
+    [[ -e "$img" ]] || continue
+    for f in etc/modprobe.d/amdgpu.conf etc/modprobe.d/t2-wifi-off.conf; do
+      [[ -n "$(lsinitrd -f "$f" "$img" 2>/dev/null)" ]] && stale_initramfs=1
+    done
+    if [[ "$(lsinitrd -f etc/cmdline.d/20-force_drivers.conf "$img" 2>/dev/null)" == *rd.driver.pre=amdgpu* ]]; then
+      stale_initramfs=1
+    fi
+  done
+fi
+
+n=0
+step() { n=$((n + 1)); echo; echo "${n}. $*"; }
+
+echo
+echo "====== Remaining steps ======"
+(( DRY_RUN )) && echo "(dry run: lists the steps a real run would leave)"
+
+need_mkconfig=0
+
+if names_acpi_img "$initrd_custom"; then
+  step "Edit ${GRUB_FILE} — stop loading the ACPI override image:"
+  rest="$(without_acpi_img "$initrd_custom")"
+  if [[ -z "$rest" ]]; then
+    echo "     Delete the line  GRUB_EARLY_INITRD_LINUX_CUSTOM=\"${initrd_custom}\""
+  else
+    echo "     GRUB_EARLY_INITRD_LINUX_CUSTOM=\"${rest}\""
+  fi
+  (( bls )) || need_mkconfig=1
+fi
+
+if (( ${#present[@]} )); then
+  if (( bls && have_grubby )); then
+    step "Remove the kernel parameters from every boot entry (grubby also updates ${GRUB_FILE}):"
+    echo
+    echo "     sudo grubby --update-kernel=ALL --remove-args=\"${present[*]}\""
+  else
+    step "Remove the kernel parameters ${present[*]}:"
+    if [[ "${cmdline_rest[*]:-}" != "$cmdline_default" ]]; then
+      echo "     In ${GRUB_FILE}, replace the GRUB_CMDLINE_LINUX line with:"
+      echo
+      echo "       GRUB_CMDLINE_LINUX=\"${cmdline_rest[*]:-}\""
+    fi
+    if (( bls )); then
+      echo "     grubby is not installed: also delete them from the options line of"
+      echo "     each /boot/loader/entries/*.conf"
+    else
+      need_mkconfig=1
+    fi
+  fi
+  echo "     (pci=noaer and pcie_aspm=off are general PCI settings; keep any you want.)"
+fi
+
+if names_acpi_img "$env_initrd"; then
+  step "Clear the image from GRUB's environment block — grub2-mkconfig sets"
+  echo "   early_initrd but never clears it:"
+  echo
+  rest="$(without_acpi_img "$env_initrd")"
+  if [[ -z "$rest" ]]; then
+    echo "     sudo grub2-editenv - unset early_initrd"
+  else
+    echo "     sudo grub2-editenv - set early_initrd=\"${rest}\""
+  fi
+fi
+
+if grep -qs "$ACPI_IMG_NAME" "$grub_cfg"; then need_mkconfig=1; fi
+if (( need_mkconfig )); then
+  step "Regenerate the GRUB config (${boot_mode}):"
+  echo
+  echo "     sudo grub2-mkconfig -o ${grub_cfg}"
+fi
+
+for entry in /boot/loader/entries/*.conf; do
+  [[ -r "$entry" ]] || continue
+  if grep -qs "^initrd.*${ACPI_IMG_NAME}" "$entry"; then
+    step "Remove ${ACPI_IMG_NAME} from the initrd line of ${entry}"
+  fi
+done
+
+if (( stale_initramfs )); then
+  step "Rebuild every initramfs — they still embed this project's dracut and modprobe config:"
+  echo
+  echo "     sudo dracut -f --regenerate-all"
+fi
+
+if (( img_kept )); then
+  step "Delete the ACPI override image, now that nothing loads it:"
+  echo
+  echo "     sudo ${SRC_DIR}/uninstall.sh --all"
+fi
+
+if (( n || removed_any )); then
+  step "Reboot."
+else
+  echo
+  say "Nothing left to do."
+fi
+echo
