@@ -561,7 +561,7 @@ say "✅ Installation complete."
 cmdline_ok() {
   local p
   for p in "${REQUIRED_PARAMS[@]}"; do has_word "$p" "$1" || return 1; done
-  ! has_word nomodeset "$1" && ! has_word amdgpu.modeset=0 "$1"
+  ! has_word nomodeset "$1"
 }
 
 # mtime PATH — modification time in epoch seconds, 0 when PATH is missing.
@@ -591,8 +591,11 @@ else
   # * ? or [ that matches no file would silently vanish from the line.
   read -ra cmdline_words <<<"$cur_cmdline"
   for w in "${cmdline_words[@]}"; do
-    if [[ "$w" == nomodeset || "$w" == amdgpu.modeset=0 ]]; then
-      had_nomodeset=1          # drop it: it disables the amdgpu driver entirely
+    # nomodeset keeps amdgpu from probing.  amdgpu.modeset=0 does not: on
+    # current kernels the parameter only overrides nomodeset (1 = enable,
+    # -1 = auto), so it is left alone.
+    if [[ "$w" == nomodeset ]]; then
+      had_nomodeset=1          # drop it: amdgpu would not probe the GPU
       continue
     fi
     merged+=("$w")
@@ -616,7 +619,7 @@ generated_ok=1 entries_ok=1 entries_seen=0 entries_nomodeset=0
 note_entry() {
   entries_seen=$((entries_seen + 1))
   cmdline_ok "$1" || entries_ok=0
-  if has_word nomodeset "$1" || has_word amdgpu.modeset=0 "$1"; then
+  if has_word nomodeset "$1"; then
     entries_nomodeset=1
   fi
 }
@@ -781,7 +784,7 @@ if (( initrd_edit || cmdline_edit )); then
     (( ${#missing[@]} )) && \
       echo "      Missing ${#missing[@]} parameter(s): ${missing[*]}"
     (( had_nomodeset )) && \
-      warn "     nomodeset/amdgpu.modeset=0 is set — it disables amdgpu; removing it below"
+      warn "     nomodeset is set — it keeps amdgpu from probing the GPU; removing it below"
     echo "      Your existing parameters are kept. Replace the whole line with:"
     echo
     echo "        GRUB_CMDLINE_LINUX=\"${merged[*]}\""
@@ -805,13 +808,13 @@ if (( need_grubby )); then
   if command -v grubby &>/dev/null; then
     echo "     sudo grubby --update-kernel=ALL --args=\"${REQUIRED_PARAMS[*]}\""
     (( entries_nomodeset )) && \
-      echo "     sudo grubby --update-kernel=ALL --remove-args=\"nomodeset amdgpu.modeset=0\""
+      echo "     sudo grubby --update-kernel=ALL --remove-args=nomodeset"
   else
     echo "     grubby is not installed.  Install it (sudo dnf install grubby) and re-run"
     echo "     this installer, or add ${REQUIRED_PARAMS[*]} to the options"
     echo "     line of each /boot/loader/entries/*.conf by hand."
     (( entries_nomodeset )) && \
-      echo "     Remove nomodeset and amdgpu.modeset=0 from those lines too."
+      echo "     Remove nomodeset from those lines too."
   fi
   echo
 fi

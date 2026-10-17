@@ -6,8 +6,14 @@ Description=AMDGPU Warmfix (PCIe reset/remove-rescan + late modprobe)
 # systemd-udev-settle.service is deprecated and warns when pulled in; the
 # generated reset script waits for the GPU's own sysfs node instead.
 After=systemd-udevd.service
-ConditionKernelCommandLine=!nomodeset
-ConditionKernelCommandLine=!amdgpu.modeset=0
+# Skip only when amdgpu will not probe: `nomodeset` with no amdgpu.modeset
+# override.  amdgpu.modeset is "Override nomodeset (1 = enable, -1 = auto)";
+# its only check is `drm_firmware_drivers_only() && amdgpu_modeset == -1`
+# (amdgpu_drv.c, 7.2.8), so any value given, even 0, re-enables the probe, and
+# amdgpu.modeset=0 alone disables nothing.  "|" conditions are OR-ed; a bare
+# name matches it with any value.
+ConditionKernelCommandLine=|!nomodeset
+ConditionKernelCommandLine=|amdgpu.modeset
 # ensure display manager starts after warmfix
 Before=gdm.service display-manager.service graphical.target
 

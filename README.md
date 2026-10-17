@@ -41,7 +41,7 @@ table, which takes ~9 s off every resume from suspend — see
 
 | File | Installed to | Description |
 | --- | --- | --- |
-| `amdgpu-warmfix.service` | `/etc/systemd/system/` | Runs the PCI reset at boot, before the display manager, if amdgpu's cold probe failed. Skips itself if `nomodeset` or `amdgpu.modeset=0` is set. |
+| `amdgpu-warmfix.service` | `/etc/systemd/system/` | Runs the PCI reset at boot, before the display manager, if amdgpu's cold probe failed. Skips itself when `nomodeset` is set without an `amdgpu.modeset` override. |
 | `t2fanrd-dropin.conf` | `/etc/systemd/system/t2fanrd.service.d/10-t2-pci-amdgpu.conf` | When the t2linux `t2fanrd` package is installed (`/usr/bin/t2fanrd`): adds to the package's own unit the wait for the fan attribute, `RestartSec=5`, ordering after `applesmc-late`, and handing the fan back to the SMC on stop. The package's sandboxed unit and newer build are used as they are. |
 | `t2fanrd.service` | `/etc/systemd/system/` | Fallback without the package: runs the bundled T2 fan daemon |
 | `t2fanrd-resume.service` | `/etc/systemd/system/` | Restarts `t2fanrd` after resume — the SMC drops manual fan control across S3, so without this the fan runs loud until the daemon is restarted by hand |
@@ -148,8 +148,10 @@ becomes
 GRUB_CMDLINE_LINUX="rhgb quiet pcie_aspm=off amdgpu.aspm=0 pci=noaer amdgpu.runpm=0"
 ```
 
-Also remove `nomodeset` and `amdgpu.modeset=0` from that line if present — either
-one disables `amdgpu` entirely.
+Also remove `nomodeset` from that line if present: it keeps `amdgpu` from
+probing the GPU. (`amdgpu.modeset=0` does not disable `amdgpu` on current
+kernels. The parameter only overrides `nomodeset`, and any value given,
+`0` included, re-enables it.)
 
 Then regenerate GRUB config and initramfs:
 
@@ -170,7 +172,7 @@ Apply the parameters with grubby, which also updates `/etc/default/grub`:
 
 ```bash
 sudo grubby --update-kernel=ALL --args="pci=noaer pcie_aspm=off amdgpu.aspm=0 amdgpu.runpm=0"
-sudo grubby --update-kernel=ALL --remove-args="nomodeset amdgpu.modeset=0"
+sudo grubby --update-kernel=ALL --remove-args=nomodeset
 ```
 
 The installer prints the right commands for your system at the end of installation.
@@ -262,7 +264,7 @@ AMD GPU having come up.
 ## Troubleshooting
 
 **Booted with `nomodeset`:**
-System falls back to framebuffer (no acceleration). `amdgpu-warmfix` detects this and exits immediately.
+System falls back to framebuffer (no acceleration). `amdgpu-warmfix` does not run on such a boot, unless an `amdgpu.modeset=` override is also set (then amdgpu probes and the warmfix runs as usual).
 
 **Black screen (without `nomodeset`):**
 Check that `/boot/acpi_override.img` exists, confirm GRUB params are set, regenerate `grub.cfg`.
