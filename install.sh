@@ -86,6 +86,15 @@ install_file() {
   say "Installed: $dst"
 }
 
+# retire_file PATH WHY — back PATH up, then remove it
+retire_file() {
+  [[ -e "$1" ]] || return 0
+  if (( DRY_RUN )); then say "Would retire: $1 ($2)"; pending[$1]=1; return 0; fi
+  backup "$1"
+  rm -f -- "$1"
+  say "Retired: $1 ($2)"
+}
+
 require_root() {
   (( DRY_RUN )) && return 0
   [[ $EUID -eq 0 ]] || { err "Run with sudo/root."; exit 1; }
@@ -130,7 +139,9 @@ EOF
 enable_service() {
   local unit="$1"
   if (( DRY_RUN )); then say "Would enable: $unit"; return 0; fi
-  if [[ -f "${UNIT_DIR}/${unit}" ]]; then
+  # Ask systemd, not ${UNIT_DIR}: with the t2fanrd package the unit lives in
+  # /usr/lib/systemd/system and only a drop-in is ours.
+  if [[ "$(systemctl show -p LoadState --value "$unit" 2>/dev/null)" == loaded ]]; then
     systemctl enable "$unit"
     say "Enabled: $unit"
   fi
@@ -274,9 +285,25 @@ fi
 # 2) Service units → /etc/systemd/system/
 # ---------------------------------------------------------------------------
 say "Installing service units"
+# t2fanrd: the t2linux package's build and unit when installed, with this
+# repo's additions as a drop-in.  This repo's own unit in ${UNIT_DIR} would
+# replace the package's whole unit, sandboxing included, and its bundled
+# binary predates upstream's fixes (journal flooding, averaging).
+T2FANRD_DROPIN="${UNIT_DIR}/t2fanrd.service.d/10-t2-pci-amdgpu.conf"
+t2fanrd_pkg=0
+[[ -x /usr/bin/t2fanrd && -f /usr/lib/systemd/system/t2fanrd.service ]] && t2fanrd_pkg=1
 for f in "${SRC_DIR}"/*.service; do
+  if (( t2fanrd_pkg )) && [[ "$(basename "$f")" == t2fanrd.service ]]; then continue; fi
   install_file "$f" "${UNIT_DIR}/$(basename "$f")"
 done
+if (( t2fanrd_pkg )); then
+  say "t2fanrd: using the packaged /usr/bin/t2fanrd and its unit"
+  retire_file "${UNIT_DIR}/t2fanrd.service" "would hide the package's unit"
+  install_file "${SRC_DIR}/t2fanrd-dropin.conf" "$T2FANRD_DROPIN"
+else
+  # Names /usr/bin/t2fanrd, which is gone with the package.
+  retire_file "$T2FANRD_DROPIN" "the t2fanrd package is not installed"
+fi
 
 # ---------------------------------------------------------------------------
 # 3) GPU PCI reset script (generated from template with detected slot address)
@@ -332,9 +359,11 @@ for f in "${SRC_DIR}"/*.sh; do
   install_file "$f" "${BIN_DIR}/$(basename "$f")" 0755
 done
 
-for bin in t2fanrd; do
-  install_file "${SRC_DIR}/${bin}" "${BIN_DIR}/${bin}" 0755
-done
+if (( t2fanrd_pkg )); then
+  retire_file "${BIN_DIR}/t2fanrd" "superseded by the packaged /usr/bin/t2fanrd"
+else
+  install_file "${SRC_DIR}/t2fanrd" "${BIN_DIR}/t2fanrd" 0755
+fi
 
 # ---------------------------------------------------------------------------
 # 5) System config files

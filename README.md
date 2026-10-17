@@ -42,7 +42,8 @@ table, which takes ~9 s off every resume from suspend — see
 | File | Installed to | Description |
 | --- | --- | --- |
 | `amdgpu-warmfix.service` | `/etc/systemd/system/` | Runs the PCI reset at boot, before the display manager, if amdgpu's cold probe failed. Skips itself if `nomodeset` or `amdgpu.modeset=0` is set. |
-| `t2fanrd.service` | `/etc/systemd/system/` | Runs the T2 fan daemon |
+| `t2fanrd-dropin.conf` | `/etc/systemd/system/t2fanrd.service.d/10-t2-pci-amdgpu.conf` | When the t2linux `t2fanrd` package is installed (`/usr/bin/t2fanrd`): adds to the package's own unit the wait for the fan attribute, `RestartSec=5`, ordering after `applesmc-late`, and handing the fan back to the SMC on stop. The package's sandboxed unit and newer build are used as they are. |
+| `t2fanrd.service` | `/etc/systemd/system/` | Fallback without the package: runs the bundled T2 fan daemon |
 | `t2fanrd-resume.service` | `/etc/systemd/system/` | Restarts `t2fanrd` after resume — the SMC drops manual fan control across S3, so without this the fan runs loud until the daemon is restarted by hand |
 | `applesmc-late.service` | `/etc/systemd/system/` | Loads `applesmc` once the `apple-bce` PCI driver has bound |
 
@@ -60,7 +61,7 @@ device a given unit needs is present. Each unit now waits on its own preconditio
 | `amdgpu-check.sh` | `/usr/local/bin/` | GPU health check: render node, module state, installed kernels with the broken `imac5k_table` quirk, PCI power state, warmfix log. Offers live warmfix re-trigger if GPU is missing (requires root). |
 | `t2-gpu-status.sh` | `/usr/local/bin/` | Quick GPU and service status snapshot |
 | `t2-wait-sysfs.sh` | `/usr/local/bin/` | Blocks until a sysfs path matching any given glob appears. Used as `ExecStartPre=` in place of `udevadm settle` — waits for the one device the unit needs instead of the whole coldplug queue |
-| `t2fanrd` | `/usr/local/bin/` | Prebuilt T2 fan controller daemon — [GnomedDev/T2FanRD](https://github.com/GnomedDev/T2FanRD) |
+| `t2fanrd` | `/usr/local/bin/` | Fallback without the package: prebuilt T2 fan controller daemon — [GnomedDev/T2FanRD](https://github.com/GnomedDev/T2FanRD). With the package installed, the installer removes any copy here (backed up) |
 
 ### Config files
 
@@ -99,7 +100,7 @@ The installer will:
    Apple's `TbtOnPCH` table (rebuilt every run, replaced only if it changed)
 2. Install all `*.service` units to `/etc/systemd/system/`
 3. Auto-detect the AMD GPU PCI slot and generate `/usr/local/bin/amdgpu-pci-reset-load.sh`
-4. Install scripts and the `t2fanrd` binary to `/usr/local/bin/`
+4. Install scripts to `/usr/local/bin/`, plus the bundled `t2fanrd` binary when the t2linux `t2fanrd` package is not installed
 5. Install `modprobe.d`, `udev`, and `dracut` config files
 6. Create `/etc/t2fand.conf`, or reconcile an existing one (see below)
 7. Enable `amdgpu-warmfix`, `t2fanrd`, `t2fanrd-resume`, and `applesmc-late` services
@@ -429,4 +430,4 @@ before suspending; each device then logs `calling …` / `… returned 0 after N
 
 - Developed on Fedora 43, iMac20,2 (EFI boot).
 - Should work on other T2 Macs with AMD GPUs — feedback welcome.
-- `t2fanrd` binary: SHA256 `32612f571e8de56497c7c36dc32b4f6ba85cd25888afd5bb25c6de735f5fe52f`, built with rustc 1.87.0 from [GnomedDev/T2FanRD](https://github.com/GnomedDev/T2FanRD) before its April 2026 fixes. Upstream publishes no releases or tags, so there is nothing to check the hash against. On Fedora, the t2linux COPR packages a newer build as `t2fanrd` (`/usr/bin/t2fanrd`); this repo's copy in `/usr/local/bin` takes precedence over it.
+- `t2fanrd` binary: SHA256 `32612f571e8de56497c7c36dc32b4f6ba85cd25888afd5bb25c6de735f5fe52f`, built with rustc 1.87.0 from [GnomedDev/T2FanRD](https://github.com/GnomedDev/T2FanRD) before its April 2026 fixes. Upstream publishes no releases or tags, so there is nothing to check the hash against. It is only a fallback: on Fedora, install the t2linux COPR's `t2fanrd` package (`/usr/bin/t2fanrd`), a newer build that logs only to a terminal instead of flooding the journal, and the installer uses it instead.

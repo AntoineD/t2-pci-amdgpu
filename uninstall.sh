@@ -137,6 +137,15 @@ fi
 for f in amdgpu-warmfix.service t2fanrd-resume.service t2fanrd.service applesmc-late.service; do
   offer_restore "/etc/systemd/system/$f"
 done
+# Drop-in for the t2linux package's own t2fanrd unit
+offer_restore "/etc/systemd/system/t2fanrd.service.d/10-t2-pci-amdgpu.conf"
+if ! (( DRY_RUN )); then
+  rmdir -- /etc/systemd/system/t2fanrd.service.d 2>/dev/null && say "Removed empty dir: /etc/systemd/system/t2fanrd.service.d" || true
+fi
+if [[ -x /usr/bin/t2fanrd ]]; then
+  warn "The t2fanrd package stays installed but disabled; to run it without this"
+  warn "project: sudo systemctl enable --now t2fanrd.service"
+fi
 
 # ---------------------------------------------------------------------------
 # 4) Remove scripts and binaries from /usr/local/bin/

@@ -59,7 +59,7 @@ noise. Hence the 60/90 default.
 The daemon does smooth. `calc_speed()` itself is a pure function, but upstream
 has fed it the mean of the last 50 temperature samples since November 2023, not
 the instantaneous package temperature, which slews 47 → 86 °C in one second.
-Measured 2026-10-17 with the bundled binary:
+Measured 2026-10-17 with the bundled binary (the packaged build reacts faster; see Key file relationships):
 - An 8 s, 8-thread burst took the package 41 → 81 °C. `fan1_output` stayed at
   1200 for ~4.5 s, then rose 1203 → 1581 while the temperature held at 80–81 °C,
   and was back at 1200 ~4 s after the load stopped.
@@ -91,7 +91,7 @@ Check `fan1_manual` (want `1`) and `NRestarts` (want `0`), not just
 `systemctl is-active` — `Restart=always` makes a hard-failing unit report
 `activating (auto-restart)` forever, and each cycle's `ExecStopPost` rewrites
 `fan1_manual=0`, so the restart loop actively re-hands the fan to the SMC every
-`RestartSec`. This is why every `ExecStartPre=` modprobe in `t2fanrd.service`
+`RestartSec`. This is why every `ExecStartPre=` modprobe in the fallback `t2fanrd.service`
 carries a `-` prefix: the `apple_bce` → `t2bce_core` rename in the 7.1 t2 kernel
 turned one of them into a hard failure and silently cost fan control. The real
 start gate is the `t2-wait-sysfs.sh` precondition, not the modprobes.
@@ -201,7 +201,18 @@ unit's `modprobe` is normally a no-op. It is kept as insurance, not as the path.
 - `install.sh` `try-restart`s `t2fanrd` at the end — the daemon reads its config and unit only at start, so a rewritten band otherwise changes nothing until reboot. Its "up to date" verdict compares `speed_curve` and `always_full_speed` too, not only the band.
 - `install.sh` GRUB guidance: on Fedora 34+ the real config is `/boot/grub2/grub.cfg` even on EFI (`/boot/efi/EFI/fedora/grub.cfg` is a `configfile` stub — never overwrite it). With `GRUB_ENABLE_BLSCFG=true`, `grub2-mkconfig` does not touch `/boot/loader/entries/*.conf`, so cmdline params go in with `grubby --update-kernel=ALL --args=...` (which also updates `/etc/default/grub`). fc43's grub2-mkconfig has no `--update-bls-cmdline`; the installer uses it only if `--help` lists it.
 - `GFXALT-multi.aml` is the precompiled ACPI table. Recompile from `.dsl` with: `iasl -ve -tc GFXALT-multi.dsl`
-- `t2fanrd` is a prebuilt binary from [GnomedDev/T2FanRD](https://github.com/GnomedDev/T2FanRD), not built from source in this repo.
+- `t2fanrd`: when the t2linux package is installed (`/usr/bin/t2fanrd` plus `/usr/lib/systemd/system/t2fanrd.service`), `install.sh` uses the package's build and sandboxed unit. It installs `t2fanrd-dropin.conf` as `t2fanrd.service.d/10-t2-pci-amdgpu.conf` and retires, with a backup, this repo's `/etc/systemd/system/t2fanrd.service` and `/usr/local/bin/t2fanrd`.
+  The drop-in exists for these reasons:
+  - It names `ExecStart=/usr/bin/t2fanrd`, because a bare `t2fanrd` resolves `/usr/local/bin` first.
+  - It adds the sysfs wait and `RestartSec=5`. The package unit has neither, so with the 100 ms default an early start would use up the start limit.
+  - It runs the hand-back as `ExecStopPost=+…`, outside the sandbox.
+  - It has no modprobes, because `ProtectKernelModules=true` blocks them and `applesmc-late` does them anyway.
+  `enable_service` asks systemd for `LoadState` rather than requiring a file in `/etc`. Without the package, the bundled binary (a pre-April-2026 build that floods the journal with `ESC[1KSetting fan speed` lines) and the full unit are installed as before. Both builds glob `/sys/devices/pci*/*/*/*/APP0001:00/fan*`, which matches here through `firmware_node/subsystem/devices`.
+  Measured 2026-10-17 after the switch:
+  - The package build logs its parsed config at start, then nothing (0 bytes during a load burst).
+  - It also reads `fan1_max` once. Its start after `install.sh` logged `max_speed: 3600`; whether cold-boot starts still read 2700 is unchecked.
+  - It responds faster: in an 8-thread burst at 85 °C it went 1200 → 2146 RPM in 6 s and to 2588 RPM by 10 s, where the bundled build reached 1581.
+  - Stopping the unit still writes `fan1_manual=0`.
 - `10-amdgpu-warmfix.conf` uses `force_drivers` (not `add_drivers`) to guarantee early module loading in initramfs. On T2 the early load buys no early KMS: amdgpu takes 3.3 s of CPU in `dracut-pre-udev` (blocking udev and the NVMe root disk), then defers its probe until `apple_gmux` binds in the real root (6.9–7.1 s). Do **not** add `apple_gmux` to move the probe into the initramfs. Tried 2026-10-13 on iMac20,2, 7 boots: the cold probe failed on 6 (about half before). The initramfs held switch-root until the failing probe ended (5.6 → 7.6 s), so gdm came no earlier. The re-probe took 4.3 s instead of 3.6 s, and Plymouth lost its splash. One boot failed the re-probe too, then the retry (`invalid ip discovery binary signature`) left the screen black. Consequence: any name that does not resolve to a real `.ko` is a **fatal** `dracut -f` error, not a warning. `pcieport` was listed here and broke `dracut -f` outright — the PCIe port driver is compiled into the PCI core (`CONFIG_PCIEPORTBUS=y`), so it is neither a module nor a `modules.builtin` entry. Check any addition with `modinfo -n <name>` before committing it.
 
 ## Testing and verification
