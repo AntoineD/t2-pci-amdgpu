@@ -17,15 +17,29 @@ ACTION=="add", SUBSYSTEM=="pci", \
   ATTR{vendor}=="0x1002", ATTR{class}=="0x040300", \
   ATTR{power/control}="on"
 
-# Pin AMD GPU dynamic power management to "low" to prevent thermal crashes.
-# See https://wiki.t2linux.org/guides/hybrid-graphics/
+# GPU dynamic power management level: "low" unless /etc/t2-pci-amdgpu.conf
+# says T2_GPU_DPM=auto or high.  Change it with `sudo t2-gpu-dpm.sh auto`,
+# which also applies it at once.
+# "low" (300 MHz core) dates from the t2linux hybrid-graphics guide's advice
+# for MacBook dGPUs ("thermal crashes").  On iMac20,2 "auto" measured the same
+# at idle (10 W, 42 °C; the core sleeps between frames) and, under 5 min of
+# full load, 45 W with the junction at 66 °C (critical 105 °C), +41 % FPS.
 # Only the card itself.  DRIVERS=="amdgpu" alone also matched every connector
 # (card1-eDP-1, card1-DP-1, ...) and simpledrm's card0, whose platform device
 # sits under the GPU: none has the attribute, so udev logged "Could not chase
 # sysfs attribute" about 7 times per boot.
+ACTION=="remove", GOTO="t2_gpu_dpm_end"
 SUBSYSTEM=="drm", KERNEL=="card*", KERNEL!="card*-*", DRIVERS=="amdgpu", \
   TEST=="device/power_dpm_force_performance_level", \
-  ATTR{device/power_dpm_force_performance_level}="low"
+  ENV{T2_GPU_DPM}="low", GOTO="t2_gpu_dpm_set"
+GOTO="t2_gpu_dpm_end"
+LABEL="t2_gpu_dpm_set"
+TEST=="/etc/t2-pci-amdgpu.conf", IMPORT{file}="/etc/t2-pci-amdgpu.conf"
+# Anything else ("manual", a typo) would leave the driver's own "auto" or a
+# half-set manual state; fall back to the default instead.
+ENV{T2_GPU_DPM}!="low|auto|high", ENV{T2_GPU_DPM}="low"
+ATTR{device/power_dpm_force_performance_level}="$env{T2_GPU_DPM}"
+LABEL="t2_gpu_dpm_end"
 
 # Record that amdgpu's probe returned success, for the warmfix's settle wait.
 # driver_bound() sends "bind" only after amdgpu_pci_probe() has returned 0, so

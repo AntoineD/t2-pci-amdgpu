@@ -16,7 +16,7 @@ The fix operates in five layers, from earliest to latest in the boot sequence:
 | --- | --- | --- | --- |
 | **ACPI override** | Injects `_PR3`/`_DSM` stubs into the GPU ACPI device | Early initrd (before kernel) | Apple's ACPI tables omit the power-resource and device-specific methods the Linux AMDGPU driver expects; without them the PCI link comes up in an undefined state and the driver fails to initialize |
 | **modprobe.d** | Sets `amdgpu.aspm=0`, `amdgpu.runpm=0`, `snd_hda_intel.power_save_controller=0`, blacklists `radeon` | Module load | Keeps amdgpu from setting up ASPM itself and disables runtime power management, so neither GPU function can be powered down after its driver claims it; blacklisting `radeon` prevents it from racing `amdgpu`. Neither this nor `pcie_aspm=off` turns off the ASPM L1 that Apple's firmware enables on the GPU link |
-| **udev rule** | Pins GPU PCI functions to `power/control=on`; sets DPM to `low` | Device bind / driver load | PCIe runtime PM can suspend the GPU between the ACPI fix and the driver binding; pinning the power state to `on` closes that window. DPM `low` prevents thermal crashes on T2 hardware. |
+| **udev rule** | Pins GPU PCI functions to `power/control=on`; sets the DPM level (`low` unless changed, see [GPU performance level](#gpu-performance-level)) | Device bind / driver load | PCIe runtime PM can suspend the GPU between the ACPI fix and the driver binding; pinning the power state to `on` closes that window. |
 | **Warmfix service** | PCI remove → rescan with retry + readiness check; skipped when amdgpu's cold probe already succeeded | systemd, before display manager | Forcing the PCI bus to re-enumerate the GPU slot makes the kernel re-read its BARs and re-run PCI init cleanly; the retry handles the ~15 s corruption case where the first init attempt fails |
 | **DM drop-in** | Ensures display manager starts only after warmfix | systemd ordering | Without explicit ordering, GDM can race the warmfix and start against an uninitialised GPU, producing a black screen or failed compositor |
 
@@ -33,7 +33,7 @@ table, which takes ~9 s off every resume from suspend — see
 | File | Description |
 | --- | --- |
 | `install.sh` | Main installer — runs all steps below |
-| `uninstall.sh` | Removes all installed files, disables services, then prints the GRUB and initramfs cleanup steps this system still needs. `--all` also removes `/boot/acpi_override.img` and `/etc/t2fand.conf`, but keeps the image while GRUB still loads it: GRUB loads no initramfs at all when one of its files is missing, and the system would not boot. `--dry-run` previews everything. |
+| `uninstall.sh` | Removes all installed files, disables services, then prints the GRUB and initramfs cleanup steps this system still needs. `--all` also removes `/boot/acpi_override.img`, `/etc/t2fand.conf` and `/etc/t2-pci-amdgpu.conf`, but keeps the image while GRUB still loads it: GRUB loads no initramfs at all when one of its files is missing, and the system would not boot. `--dry-run` previews everything. |
 | `t2-grub-common.bash` | GRUB helpers sourced by both scripts (not installed) |
 | `amdgpu-reset-pci-template` | Template for the PCI reset script; `ADDR` is replaced with the detected slot at install time |
 
@@ -60,6 +60,7 @@ device a given unit needs is present. Each unit now waits on its own preconditio
 | --- | --- | --- |
 | `amdgpu-check.sh` | `/usr/local/bin/` | Health check: render node, module state, installed kernels with the broken `imac5k_table` quirk, PCI power state, warmfix log, GPU DPM level/clocks/temperatures/power, HDMI/DP audio, the fan daemon (binary, restarts, `fan1_manual`, RPM and the daemon's speed limit) and the CPU power profile. Offers live warmfix re-trigger if GPU is missing (requires root). |
 | `t2-gpu-status.sh` | `/usr/local/bin/` | Quick GPU and service status snapshot |
+| `t2-gpu-dpm.sh` | `/usr/local/bin/` | Shows or sets the GPU's DPM level (`low`, `auto`, `high`). Setting it saves `T2_GPU_DPM` in `/etc/t2-pci-amdgpu.conf` for every boot and applies it at once. See [GPU performance level](#gpu-performance-level) |
 | `t2-wait-sysfs.sh` | `/usr/local/bin/` | Blocks until a sysfs path matching any given glob appears. Used as `ExecStartPre=` in place of `udevadm settle` — waits for the one device the unit needs instead of the whole coldplug queue |
 | `t2fanrd` | `/usr/local/bin/` | Fallback without the package: prebuilt T2 fan controller daemon — [GnomedDev/T2FanRD](https://github.com/GnomedDev/T2FanRD). With the package installed, the installer removes any copy here (backed up) |
 
@@ -69,7 +70,7 @@ device a given unit needs is present. Each unit now waits on its own preconditio
 | --- | --- | --- |
 | `amdgpu.conf` | `/etc/modprobe.d/` | Sets `amdgpu.aspm=0` and `amdgpu.runpm=0` at module level; blacklists `radeon`; sets `snd_hda_intel.power_save_controller=0` so the GPU's HDMI audio function stays out of runtime suspend |
 | `amdgpu-navi10-imac.conf` | `/etc/modprobe.d/` | Only on iMac20,x with a Navi 10 GPU (Radeon Pro 5700 / 5700 XT). Sets `amdgpu.ppfeaturemask=0xfff7bffd`, which keeps memory-clock scaling out of the power-management controller's start-up request. Without it, that controller hangs on most cold boots, and the GPU only came up after the warmfix's reset, ~6 s later and without HDMI/DP audio. With it, 9 of 9 cold boots came up first time. Cost: the memory clock cannot scale up under load. |
-| `99-amdgpu-t2.rules` | `/etc/udev/rules.d/` | Pins the AMD VGA function to `power/control=on` at device bind; sets DPM to `low`; records amdgpu's successful bind (`AMDGPU_WARMFIX_BOUND=1`) so the warmfix can stop waiting for the probe. Also targets the HDMI audio function, but that write is best-effort — `snd_hda_intel` resets it to `auto` when it binds, which is why the module option above exists |
+| `99-amdgpu-t2.rules` | `/etc/udev/rules.d/` | Pins the AMD VGA function to `power/control=on` at device bind; sets the DPM level saved in `/etc/t2-pci-amdgpu.conf` (`low` when there is none); records amdgpu's successful bind (`AMDGPU_WARMFIX_BOUND=1`) so the warmfix can stop waiting for the probe. Also targets the HDMI audio function, but that write is best-effort — `snd_hda_intel` resets it to `auto` when it binds, which is why the module option above exists |
 | `99-t2-usb.rules` | `/etc/udev/rules.d/` | Pins USB root hubs (`idVendor=1d6b`, hub class `09`) to `power/control=on`. T2 xHCI hubs autosuspend aggressively and stop reporting device attach events; pinning the root hubs awake fixes USB-to-Ethernet adapters and similar devices not appearing in `lsusb`. |
 | `99-t2-wifi-off.rules` | `/etc/udev/rules.d/` | Only with `install.sh --disable-wifi`. Removes the Wi-Fi (ACPI `ARPT`) and its root port from the PCI tree at boot, so Apple's 1 s link waits on that port no longer run on every suspend and resume. Bluetooth is unaffected — it is on the UART. |
 | `t2-wifi-off.conf` | `/etc/modprobe.d/` | Only with `install.sh --disable-wifi`. Blacklists `brcmfmac`, which without Apple's firmware files only fails its probe and logs a `__flush_work` warning every boot. |
@@ -361,6 +362,37 @@ systemctl status amdgpu-warmfix.service
 # verify the drop-in exists:
 ls /etc/systemd/system/gdm.service.d/10-amdgpu-warmfix.conf
 ```
+
+---
+
+## GPU performance level
+
+The udev rule holds the GPU at DPM level `low` (300 MHz core) unless told
+otherwise. That is cool and quiet, but games and compute get a fraction of the
+GPU. To let the driver scale the clock with load:
+
+```bash
+sudo t2-gpu-dpm.sh auto      # saved for every boot, applied now
+t2-gpu-dpm.sh                # show the saved and the live level
+sudo t2-gpu-dpm.sh low       # back to the default
+```
+
+Measured on iMac20,2 (Radeon Pro 5700), `glmark2` terrain at 2560×1440:
+
+| Level | Idle | Under load | FPS | Junction after 5 min |
+| --- | --- | --- | --- | --- |
+| `low` | 10 W, 42 °C | 23 W, 300 MHz | 125 | — (49 °C at 60 s) |
+| `auto` | 10 W, 42 °C | 45 W, 1350 MHz | 176–181 | 66 °C (critical 105 °C) |
+
+`auto` costs nothing at idle: the core sleeps between frames. `low` came from
+the t2linux hybrid-graphics guide's advice for MacBook dGPUs; nothing on this
+iMac needed it. The fan daemon follows the GPU temperature only when it finds
+the GPU's sensor, which the packaged T2FanRD does not do at boot (see
+CLAUDE.md, "Fan daemon config path"); in the 5-minute run the GPU stayed
+below the fan curve's 60 °C start until the last 30 s.
+
+`high` holds the top clock even at idle and was not measured. If LACT's
+daemon (`lactd`) is enabled, it sets this level too; use LACT instead.
 
 ---
 

@@ -3,8 +3,9 @@
 #
 # Usage: sudo ./uninstall.sh [--all] [--dry-run]
 #
-#   --all       Also remove /boot/acpi_override.img and /etc/t2fand.conf
-#               (plus the legacy /etc/t2fanrd.conf, which t2fanrd never read)
+#   --all       Also remove /boot/acpi_override.img, /etc/t2fand.conf
+#               (plus the legacy /etc/t2fanrd.conf, which t2fanrd never read),
+#               /etc/t2-pci-amdgpu.conf (the saved GPU DPM level)
 #               and /var/lib/t2-pci-amdgpu.  The image is kept for as long as
 #               GRUB still loads it: see step 6.
 #   --dry-run   Show what would be removed and which steps would remain,
@@ -150,7 +151,7 @@ fi
 # ---------------------------------------------------------------------------
 # 4) Remove scripts and binaries from /usr/local/bin/
 # ---------------------------------------------------------------------------
-for f in amdgpu-pci-reset-load.sh amdgpu-check.sh t2-gpu-status.sh t2-wait-sysfs.sh t2-unit-state.sh t2-amd-nodes.sh t2fanrd; do
+for f in amdgpu-pci-reset-load.sh amdgpu-check.sh t2-gpu-status.sh t2-wait-sysfs.sh t2-unit-state.sh t2-amd-nodes.sh t2-gpu-dpm.sh t2fanrd; do
   offer_restore "/usr/local/bin/$f"
 done
 
@@ -213,6 +214,8 @@ if (( REMOVE_ALL )); then
   remove_file "/etc/t2fand.conf"
   # Written by installers before 2026-07; t2fanrd never read it.
   remove_file "/etc/t2fanrd.conf"
+  # Saved by t2-gpu-dpm.sh; only 99-amdgpu-t2.rules, removed above, reads it.
+  remove_file "/etc/t2-pci-amdgpu.conf"
   # Firmware version the Thunderbolt patch was made on; meaningless without
   # the image above.
   if [[ -d /var/lib/t2-pci-amdgpu ]] && (( ! img_kept )); then
@@ -224,7 +227,7 @@ if (( REMOVE_ALL )); then
     fi
   fi
 else
-  warn "Kept $ACPI_IMG and /etc/t2fand.conf (use --all to remove)"
+  warn "Kept $ACPI_IMG, /etc/t2fand.conf and /etc/t2-pci-amdgpu.conf (use --all to remove)"
 fi
 
 # ---------------------------------------------------------------------------

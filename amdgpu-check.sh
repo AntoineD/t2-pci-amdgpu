@@ -175,11 +175,15 @@ gpu_dev=""
 if [[ -z "$gpu_dev" ]]; then
   warn "No AMD card node — GPU power state not available"
 else
+  # 99-amdgpu-t2.rules sets the level saved by t2-gpu-dpm.sh, "low" by default.
   dpm=$(cat "$gpu_dev/power_dpm_force_performance_level" 2>/dev/null)
-  if [[ "$dpm" == low ]]; then
-    ok  "DPM level: low (pinned by 99-amdgpu-t2.rules)"
+  want=$("$(dirname "${BASH_SOURCE[0]}")/t2-gpu-dpm.sh" saved 2>/dev/null) || want=low
+  if [[ "$dpm" == "$want" ]]; then
+    ok  "DPM level: $dpm (as saved; change with: sudo t2-gpu-dpm.sh low|auto|high)"
+  elif systemctl is-active --quiet lactd 2>/dev/null; then
+    warn "DPM level: ${dpm:-unknown}, saved $want — lactd is running and sets it too"
   else
-    warn "DPM level: ${dpm:-unknown} — 99-amdgpu-t2.rules pins it to low"
+    warn "DPM level: ${dpm:-unknown}, but $want is saved for boot — apply it with: sudo t2-gpu-dpm.sh $want"
   fi
   # Navi 10 iMac20,x boards need memory-clock DPM kept out of SMU init
   # (amdgpu-navi10-imac.conf); without it most cold probes fail.
