@@ -19,7 +19,12 @@ ACTION=="add", SUBSYSTEM=="pci", \
 
 # Pin AMD GPU dynamic power management to "low" to prevent thermal crashes.
 # See https://wiki.t2linux.org/guides/hybrid-graphics/
-SUBSYSTEM=="drm", DRIVERS=="amdgpu", \
+# Only the card itself.  DRIVERS=="amdgpu" alone also matched every connector
+# (card1-eDP-1, card1-DP-1, ...) and simpledrm's card0, whose platform device
+# sits under the GPU: none has the attribute, so udev logged "Could not chase
+# sysfs attribute" about 7 times per boot.
+SUBSYSTEM=="drm", KERNEL=="card*", KERNEL!="card*-*", DRIVERS=="amdgpu", \
+  TEST=="device/power_dpm_force_performance_level", \
   ATTR{device/power_dpm_force_performance_level}="low"
 
 # Record that amdgpu's probe returned success, for the warmfix's settle wait.
