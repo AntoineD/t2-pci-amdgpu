@@ -275,6 +275,91 @@ wait_for_gpu() {
   return 1
 }
 
+# The GPU's HDMI/DP audio function, and the bus both functions sit on.
+GPU_AUDIO="/sys/bus/pci/devices/0000:ADDR.1"
+GPU_BUS="0000:ADDR"; GPU_BUS="/sys/class/pci_bus/${GPU_BUS%:*}"
+
+# True if the audio function's BAR0 was wiped behind the kernel's back: config
+# space reads 0 while the kernel still has the BAR assigned.
+audio_bar_wiped() {
+  local cfg res _
+  [ -e "$GPU_AUDIO/config" ] || return 1
+  cfg=$(od -A n -t x4 -j 16 -N 4 "$GPU_AUDIO/config" 2>/dev/null) || return 1
+  cfg=${cfg//[[:space:]]/}
+  [ -n "$cfg" ] || return 1
+  read -r res _ <"$GPU_AUDIO/resource" || return 1
+  (( res != 0 && (0x$cfg & ~0xf) == 0 ))
+}
+
+# Last probe event the kernel logged for the audio function: "start" when
+# snd_hda_intel enabled it, "failed" when its probe work gave up.
+kmsg_last_audio_event() {
+  dmesg 2>/dev/null | awk -v dev="${GPU_AUDIO##*/}: " '
+    !index($0, dev)                                  { next }
+    index($0, "enabling device")                     { e = "start"; next }
+    index($0, "not operational") || index($0, "no codecs initialized") { e = "failed" }
+    END { print e }' || true
+}
+
+# True once snd_hda_intel's probe of the audio function is over: no driver
+# bound, a sound card registered, or its failure logged.
+audio_probe_done() {
+  local c
+  [ -e "$GPU_AUDIO/driver" ] || return 0
+  for c in "$GPU_AUDIO"/sound/card*; do
+    [ -e "$c" ] && return 0
+  done
+  [ "$(kmsg_last_audio_event)" = failed ]
+}
+
+# Give the audio function back its config space after the GPU reset.
+#
+# amdgpu's re-probe finds PSP still running from the earlier probe, so
+# nv_need_reset_on_init() asks for a PSP mode1 reset.  That resets the whole
+# ASIC, audio function included, and amdgpu restores config space for the VGA
+# function only.  The audio function's BAR0 then reads 0 while the kernel
+# still has it assigned (iMac20,2: resource 0x816a0000, config 0): its MMIO
+# reads return all-ones, snd_hda_intel fails with "CORB reset timeout ...
+# CORBRP = 65535" and "GPU sound probed, but not operational", and there is
+# no audio over the GPU's HDMI/DP outputs.  All 12 reset boots in a 25-boot
+# sample lost it.
+#
+# Removing the function and rescanning gives it a fresh config space and a
+# working probe.  Only this bus is rescanned: it still holds the VGA function,
+# so the kernel does a plain rescan of it, and nothing elsewhere (the Wi-Fi
+# port that 99-t2-wifi-off.rules removed) is re-added.  The remove waits for
+# snd_hda_intel's probe work to end, by the same rule as amdgpu above, although
+# its remove callback is written to cancel the work safely.
+#
+# Never fails the unit: this is about audio, and the GPU is already up.
+restore_gpu_audio() {
+  local now t0
+  audio_bar_wiped || return 0
+  log "audio function $GPU_AUDIO lost its BAR in the GPU reset — re-enumerating it"
+  uptime_cs; t0=$now
+  until audio_probe_done; do
+    uptime_cs
+    if (( now - t0 >= 500 )); then
+      log "audio probe still running after 5s — removing it anyway"
+      break
+    fi
+    sleep 0.1
+  done
+  if ! { echo 1 >"$GPU_AUDIO/remove" && echo 1 >"$GPU_BUS/rescan"; }; then
+    log "WARNING — re-enumerating the audio function failed; no HDMI/DP audio this boot"
+    return 0
+  fi
+  if [ ! -e "$GPU_AUDIO" ]; then
+    log "audio function not back after the bus rescan — rescanning all buses"
+    echo 1 >/sys/bus/pci/rescan || true
+  fi
+  if [ -e "$GPU_AUDIO" ] && ! audio_bar_wiped; then
+    log "audio function re-enumerated, BAR restored"
+  else
+    log "WARNING — audio function still without its BAR; no HDMI/DP audio this boot"
+  fi
+}
+
 # A cold probe that ran to completion needs no warmfix — remove/rescan on a
 # healthy GPU just re-inits it (~6s) and re-opens the race above for no gain.
 # The failure this unit exists to recover from is loud and detectable: SMU
@@ -313,6 +398,7 @@ pci_remove_rescan
 
 if wait_for_gpu; then
   log "Stage 2: GPU initialized successfully"
+  restore_gpu_audio
 else
   log "Stage 2: GPU not ready after first attempt — retrying"
   # The rescan above started a fresh probe; removing into *that* one crashes
@@ -321,6 +407,7 @@ else
   pci_remove_rescan
   if wait_for_gpu; then
     log "Stage 2: GPU initialized on retry"
+    restore_gpu_audio
   else
     log "Stage 2: WARNING — GPU still not visible after retry; check dmesg"
   fi
