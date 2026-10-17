@@ -58,7 +58,7 @@ device a given unit needs is present. Each unit now waits on its own preconditio
 
 | File | Installed to | Description |
 | --- | --- | --- |
-| `amdgpu-check.sh` | `/usr/local/bin/` | GPU health check: render node, module state, installed kernels with the broken `imac5k_table` quirk, PCI power state, warmfix log. Offers live warmfix re-trigger if GPU is missing (requires root). |
+| `amdgpu-check.sh` | `/usr/local/bin/` | Health check: render node, module state, installed kernels with the broken `imac5k_table` quirk, PCI power state, warmfix log, GPU DPM level/clocks/temperatures/power, HDMI/DP audio, the fan daemon (binary, restarts, `fan1_manual`, RPM and the daemon's speed limit) and the CPU power profile. Offers live warmfix re-trigger if GPU is missing (requires root). |
 | `t2-gpu-status.sh` | `/usr/local/bin/` | Quick GPU and service status snapshot |
 | `t2-wait-sysfs.sh` | `/usr/local/bin/` | Blocks until a sysfs path matching any given glob appears. Used as `ExecStartPre=` in place of `udevadm settle` — waits for the one device the unit needs instead of the whole coldplug queue |
 | `t2fanrd` | `/usr/local/bin/` | Fallback without the package: prebuilt T2 fan controller daemon — [GnomedDev/T2FanRD](https://github.com/GnomedDev/T2FanRD). With the package installed, the installer removes any copy here (backed up) |
@@ -276,6 +276,8 @@ Verify with `lspci -nn | grep VGA`. If the slot is wrong, edit `/usr/local/bin/a
 **Fan loud and unrelated to CPU load** (ramps at idle, ignores a cool package):
 `t2fanrd` is not running, so the SMC is driving the fan on its own firmware
 curve — which follows chassis/ambient sensors, not the CPU package.
+
+`amdgpu-check.sh` reports all of this under "Fan daemon". By hand:
 
 ```bash
 systemctl is-active t2fanrd.service                        # want: active

@@ -166,6 +166,103 @@ for d in /sys/bus/pci/devices/*; do
     "$(basename "$d")" "$ctrl" "$status"
 done
 
+# --- GPU power and HDMI audio -------------------------------------------------
+echo
+say "GPU power state:"
+card=$(amd_nodes card); card=${card%% *}
+gpu_dev=""
+[[ -n "$card" ]] && gpu_dev=$(readlink -f "/sys/class/drm/${card##*/}/device")
+if [[ -z "$gpu_dev" ]]; then
+  warn "No AMD card node — GPU power state not available"
+else
+  dpm=$(cat "$gpu_dev/power_dpm_force_performance_level" 2>/dev/null)
+  if [[ "$dpm" == low ]]; then
+    ok  "DPM level: low (pinned by 99-amdgpu-t2.rules)"
+  else
+    warn "DPM level: ${dpm:-unknown} — 99-amdgpu-t2.rules pins it to low"
+  fi
+  clocks=""
+  for f in sclk mclk; do
+    cur=$(grep -m1 '\*' "$gpu_dev/pp_dpm_$f" 2>/dev/null | awk '{print $2}')
+    clocks+=" $f=${cur:-?}"
+  done
+  temps=""
+  for l in "$gpu_dev"/hwmon/hwmon*/temp*_label; do
+    [[ -e "$l" ]] || continue
+    t=$(cat "${l%_label}_input" 2>/dev/null) || continue
+    (( t > 0 )) && temps+=" $(cat "$l")=$(( t / 1000 ))°C"
+  done
+  pw=$(cat "$gpu_dev"/hwmon/hwmon*/power1_average 2>/dev/null | head -n1)
+  printf "  %s%s  power=%s W\n" "${clocks# }" "$temps" "$(( ${pw:-0} / 1000000 ))"
+fi
+
+# On a boot where the warmfix reset the GPU, the reset wipes the HDMI audio
+# function's config space and snd_hda_intel's probe of it fails: no HDMI/DP
+# audio until the next boot with a good cold probe (known gap, see CLAUDE.md).
+for aud in /sys/bus/pci/devices/*; do
+  read -r ven 2>/dev/null < "$aud/vendor" || continue
+  read -r cls 2>/dev/null < "$aud/class"  || continue
+  [[ "$ven" == "0x1002" && "$cls" == 0x0403* ]] || continue
+  if compgen -G "$aud/sound/card*" >/dev/null; then
+    ok  "HDMI/DP audio: $(basename "$aud") has a sound card"
+  else
+    bar=$(od -A n -t x4 -j 16 -N 4 "$aud/config" 2>/dev/null | tr -d ' ')
+    if [[ "$bar" == 00000000 ]]; then
+      warn "HDMI/DP audio: none — $(basename "$aud") lost its config in the GPU reset (known gap after reset boots)"
+    else
+      warn "HDMI/DP audio: $(basename "$aud") has no sound card"
+    fi
+  fi
+done
+
+# --- Fan daemon ---------------------------------------------------------------
+# A dead or restart-looping t2fanrd leaves the fan to the SMC's own curve,
+# which ignores the CPU: loud at idle.  is-active alone hides a restart loop,
+# hence fan1_manual and NRestarts.
+echo
+say "Fan daemon:"
+smc=$(compgen -G '/sys/bus/acpi/devices/APP0001:*' | head -n1)
+[[ -n "$smc" ]] || smc=$(compgen -G '/sys/devices/platform/applesmc.*' | head -n1)
+fan_active=$(systemctl is-active t2fanrd.service 2>/dev/null)
+fan_restarts=$(systemctl show -p NRestarts --value t2fanrd.service 2>/dev/null)
+fan_exec=$(systemctl show -p ExecStart --value t2fanrd.service 2>/dev/null | sed -n 's/.*path=\([^ ;]*\).*/\1/p')
+if [[ "$fan_active" == active && "${fan_restarts:-0}" == 0 ]]; then
+  ok  "t2fanrd: active, no restarts (${fan_exec:-unknown binary})"
+else
+  fail "t2fanrd: ${fan_active:-unknown}, NRestarts=${fan_restarts:-?} — see: journalctl -u t2fanrd -b"
+fi
+if [[ "$fan_exec" == /usr/local/bin/t2fanrd && -x /usr/bin/t2fanrd ]]; then
+  warn "  Runs the bundled binary although the t2fanrd package is installed — re-run install.sh"
+fi
+if [[ -z "$smc" ]]; then
+  fail "applesmc fan attributes not found"
+else
+  manual=$(cat "$smc/fan1_manual" 2>/dev/null)
+  if [[ "$manual" == 1 ]]; then
+    ok  "fan1_manual=1 (t2fanrd holds the fan)"
+  else
+    fail "fan1_manual=${manual:-?} — the SMC drives the fan on its own curve"
+  fi
+  printf "  fan1: %s RPM (target %s, range %s–%s)\n" \
+    "$(cat "$smc/fan1_input" 2>/dev/null)" "$(cat "$smc/fan1_output" 2>/dev/null)" \
+    "$(cat "$smc/fan1_min" 2>/dev/null)" "$(cat "$smc/fan1_max" 2>/dev/null)"
+  # The daemon reads fan1_max once at start and never exceeds it; cold-boot
+  # starts have read 2700 although the SMC runs the fan to ~3600.
+  logged_max=$(journalctl -u t2fanrd -b -o cat --no-pager 2>/dev/null | sed -n 's/.*max_speed: \([0-9]*\).*/\1/p' | tail -n1)
+  [[ -n "$logged_max" ]] && echo "  daemon's speed limit (from its last start): $logged_max RPM"
+fi
+
+# --- CPU power profile --------------------------------------------------------
+echo
+say "CPU power profile:"
+if command -v tuned-adm >/dev/null; then
+  echo "  tuned: $(tuned-adm active 2>/dev/null | sed 's/^Current active profile: //')"
+elif command -v powerprofilesctl >/dev/null; then
+  echo "  power profile: $(powerprofilesctl get 2>/dev/null)"
+fi
+echo "  cpu0: governor=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)" \
+     "epp=$(cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference 2>/dev/null)"
+
 # --- Optional: live re-trigger -----------------------------------------------
 if (( gpu_ok == 0 )); then
   echo
