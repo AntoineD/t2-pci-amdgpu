@@ -74,6 +74,7 @@ device a given unit needs is present. Each unit now waits on its own preconditio
 | `99-t2-usb.rules` | `/etc/udev/rules.d/` | Pins USB root hubs (`idVendor=1d6b`, hub class `09`) to `power/control=on`. T2 xHCI hubs autosuspend aggressively and stop reporting device attach events; pinning the root hubs awake fixes USB-to-Ethernet adapters and similar devices not appearing in `lsusb`. |
 | `99-t2-wifi-off.rules` | `/etc/udev/rules.d/` | Only with `install.sh --disable-wifi`. Removes the Wi-Fi (ACPI `ARPT`) and its root port from the PCI tree at boot, so Apple's 1 s link waits on that port no longer run on every suspend and resume. Bluetooth is unaffected — it is on the UART. |
 | `t2-wifi-off.conf` | `/etc/modprobe.d/` | Only with `install.sh --disable-wifi`. Blacklists `brcmfmac`, which without Apple's firmware files only fails its probe and logs a `__flush_work` warning every boot. |
+| `t2-audio-wireplumber.conf.in` | `/etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf` (generated) | Only on T2 Macs whose speakers are one 4-channel output and that have no t2linux-audio speaker profile (iMac20,x). Adds a stereo "iMac Speakers" output in front of it and gives the card, mic and raw speaker output clearer names. See [Speaker sound](#speaker-sound). |
 | `10-amdgpu-warmfix.conf` | `/etc/dracut.conf.d/` | Embeds `amdgpu`, `nvme` and `thunderbolt` in the initramfs via `force_drivers`. Every name must resolve to a real module — `force_drivers` makes a missing one a fatal `dracut -f` error |
 | `20-amdgpu-t2-cmdline.conf` | `/etc/dracut.conf.d/` | Embeds kernel params as initramfs fallback (used only when bootloader passes no cmdline) |
 
@@ -455,6 +456,52 @@ resume lines arrive in one burst, so the gap reads as almost zero. Right after
 a resume, `sudo dmesg` shows the kernel timestamps too.
 For a per-device breakdown, write `1` to `/sys/power/pm_print_times` (as root)
 before suspending; each device then logs `calling …` / `… returned 0 after N usecs`.
+
+---
+
+## Speaker sound
+
+On iMac20,x the T2 card's speaker output has 4 channels, labelled front-left,
+front-right, rear-left and rear-right. They are two sets of drivers in the
+same speakers, not front and rear speakers, and t2linux-audio has no speaker
+profile (EQ, crossover) for these models. Sound sent straight to them comes out
+wrong:
+
+- **5.1 video:** the dialogue channel goes to the "front" set and the surround
+  channels to the "rear" set. Voices sound muffled, or as if they come from one
+  set only.
+- **Stereo:** PipeWire's default upmix sends the "rear" set only the difference
+  between left and right, delayed 12 ms, which sounds hollow.
+
+The installer adds a WirePlumber filter
+(`/etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf`). It creates
+a stereo **iMac Speakers** output that mixes everything to stereo, then sends
+left to both left channels and right to both right channels. It also renames:
+
+| Device | Name |
+| --- | --- |
+| Sound card | iMac Built-in Audio |
+| 4-channel speaker output | Raw Speakers (do not use) |
+| Built-in microphone | iMac Microphone |
+| Headset microphone (jack) | Headset Microphone (jack) |
+
+GNOME Settings labels devices "port – card", so it shows the new card name, for
+example "Internal Speakers – iMac Built-in Audio". Apps that list outputs
+themselves show the names above.
+
+It takes effect at the next login, or after `systemctl --user restart wireplumber`.
+Then:
+
+- Choose **iMac Speakers** as the output once if it is not already the default:
+  WirePlumber remembers earlier choices, and the raw output may be one of them.
+- Leave **Raw Speakers** at 100% and use the iMac Speakers volume. It is kept
+  visible so its volume can still be changed.
+- Switching the card to a headphones profile removes iMac Speakers along with
+  the raw output, so nothing is left pointing at a missing device.
+
+Checked on iMac20,2 by recording the raw output's monitor while playing 440 Hz
+left and 880 Hz right: each left channel carried only 440 Hz and each right
+channel only 880 Hz, at equal levels.
 
 ---
 

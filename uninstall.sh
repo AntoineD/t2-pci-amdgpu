@@ -174,6 +174,10 @@ offer_restore "/etc/modprobe.d/amdgpu-navi10-imac.conf"
 offer_restore "/etc/udev/rules.d/99-amdgpu-t2.rules"
 offer_restore "/etc/udev/rules.d/99-t2-usb.rules"
 offer_restore "/etc/udev/rules.d/99-t2-wifi-off.rules"
+if [[ -e /etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf ]]; then
+  offer_restore "/etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf"
+  say "Speakers: log out and back in, or run 'systemctl --user restart wireplumber' as your user"
+fi
 offer_restore "/etc/dracut.conf.d/10-amdgpu-warmfix.conf"
 offer_restore "/etc/dracut.conf.d/20-amdgpu-t2-cmdline.conf"
 

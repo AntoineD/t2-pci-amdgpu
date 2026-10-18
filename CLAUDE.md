@@ -198,6 +198,48 @@ brcmfmac never bound the BCM4364 (no Apple firmware files).
 The `pm_async=off` in `/proc/cmdline` comes from the t2 kernel's built-in
 `CONFIG_CMDLINE`, not GRUB. The `Command line:` boot log line does not show it.
 
+## Speaker audio — stereo sink over the 4-channel T2 output
+
+On iMac20,2 the T2 card (`106b:1803`, ALSA driver `AppleT2x4`, card id `Audio`)
+uses t2linux-audio's UCM `HiFi-x4.conf`. Its speaker sink has 4 channels,
+`FL FR RL RR`, which are two driver pairs, not front and rear speakers.
+t2linux-audio has DSP graphs only for MacBooks (`/usr/share/t2linux-audio/<NN_N>`),
+none for `20_2`. Unfiltered, 5.1 puts FC dialogue on FL/FR and surround on RL/RR,
+and stereo gets PipeWire's default `psd` upmix (RL/RR = L−R, delayed 12 ms). The
+user heard voices "from the rear only" and "strange" sound in videos.
+
+`install.sh` generates `/etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf`
+from `t2-audio-wireplumber.conf.in` (`@T2_AUDIO_PCI@` → `pci-0000_04_00.3`,
+`@MODEL@` → `iMac`), and only when `/proc/asound/cards` has an `AppleT2x4` card and
+there is no DSP graph for the model. Match the driver with `/\]: AppleT2x4 - /`,
+not `$3`: the padded `[Audio          ]` id splits into several fields. The file
+holds a `node.software-dsp.rules` filter (builtin `copy` nodes: L → FL+RL, R →
+FR+RR) and `monitor.alsa.rules` renames.
+
+Design choices, each tried 2026-10-18:
+- **The filter, not a `pipewire.conf.d` loopback.** WirePlumber creates the
+  filter on the raw sink's `node-added` and frees it on removal, so a headphones
+  profile leaves no dead "iMac Speakers" output behind.
+- **No `node.dont-fallback` on a static loopback.** At PipeWire start the raw
+  sink does not exist yet, so WirePlumber fails the stream ("defined target not
+  found") and the loopback module unloads itself. The filter can use it, because
+  it is created only after the target exists.
+- **`hide-parent = false`.** Hiding removes the raw sink from every client, `pactl`
+  and `wpctl` included. Its volume, a card route volume in `default-routes`, could
+  then never be raised.
+- **Priority does not pick the default output.** WirePlumber prefers its
+  `default.configured.audio.sink.N` history, which on this machine lists the raw
+  sink, over `priority.session`. The user has to pick "iMac Speakers" once.
+- **The volume is restored by `media.name`.** `state-stream.lua` keys virtual
+  `Audio/*` nodes as `Audio/Sink:media.name:<name>`, so renaming `media.name` loses
+  the saved volume.
+
+Verify routing by recording `<raw>.monitor` with an explicit
+`--channel-map=front-left,front-right,rear-left,rear-right` while playing L=440 Hz,
+R=880 Hz. Muting the raw sink keeps the speakers silent, and the monitor still
+carries the signal. Without the channel map the capture is remixed: the result
+(FL=L, FR=0, RL=R, RR=L+R) looked like a broken graph when the graph was fine.
+
 ## Unit ordering — no udev-settle
 
 No unit may order itself after `systemd-udev-settle.service`. It is deprecated,
@@ -227,6 +269,7 @@ unit's `modprobe` is normally a no-op. It is kept as insurance, not as the path.
 - `t2-unit-state.sh` is the one copy of the unit list and the oneshot state logic; `amdgpu-check.sh` and `t2-gpu-status.sh` both call it from their own directory. It tells `ran-once` from `not-run` via the boot's journal (`Finished`/`Failed to start`), not `ExecMainStartTimestamp`: systemd unloads an inactive unit nothing references (`t2fanrd-resume` after every resume), and an unloaded unit reports an empty timestamp.
 - `amdgpu-check.sh` also reports GPU DPM level, clocks, temperatures and power; HDMI/DP audio (it flags the reset-boot gap by `.1`'s config BAR0 reading 0); the fan daemon (binary path from `ExecStart`, `NRestarts`, `fan1_manual`, RPM, and the `max_speed` the daemon logged at its last start); and the tuned profile. All of it works without root except the logged `max_speed` (journal access).
 - `amdgpu-navi10-imac.conf` → `/etc/modprobe.d/` only when `install.sh` finds a Navi 10 iMac20,x GPU at the detected slot; otherwise any copy is retired. It is an initramfs input, so changing it lists a dracut step. `amdgpu-check.sh` reports the mask in effect (`/sys/module/amdgpu/parameters/ppfeaturemask`) on those boards and warns if bit `0x2` is set.
+- `t2-audio-wireplumber.conf.in` → `/etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf` (generated; see Speaker audio). WirePlumber reads it at session start, so it is not in the reboot list. `install.sh` prints a `systemctl --user restart wireplumber` hint instead when the file changed.
 - `t2-amd-nodes.sh` is the one copy of "DRM nodes under an AMD VGA function", called the same way by both scripts. The warmfix template keeps its own per-slot `gpu_render_node`: the generated script must stand alone.
 - `install.sh` ends with an "Action required" block listing only outstanding steps: `/etc/default/grub` edits, `grub2-mkconfig` when grubenv lacks `early_initrd=…acpi_override.img` (BLS) or `grub.cfg` lacks it, `grubby` when a BLS entry (`grubby --info=ALL`) lacks a required param, `dracut` for each `/boot/initramfs-<kver>.img` older than the newest dracut/modprobe input, and a reboot when a boot-time file's mtime is after `btime` or `/proc/cmdline`/the journal show the fix inactive. A finished install prints "No action required". A `--dry-run` counts every file it would install as changed now, so the preview lists the dracut and reboot steps the real run will need. Without root it skips the GRUB checks (grubenv, `/boot/loader/entries` and `grubby --info` are root-only) and says so instead of listing them. A deleted input (the `--disable-wifi` files) moves no mtime, so as root it is looked for inside each image with `lsinitrd -f`. The ACPI tables count as loaded only from their `ACPI: SSDT 0x…` header (GFXALT) or `Table Upgrade: override [SSDT-APPLE -TbtOnPCH]`, judged only when the boot's journal still starts at `Linux version`; the `table found in initrd` line names the file even when the load fails. This relies on `install_file` leaving identical files untouched: anything that rewrites unchanged files bumps mtimes and brings back spurious dracut/reboot steps.
 - `install.sh` `try-restart`s `t2fanrd` at the end — the daemon reads its config and unit only at start, so a rewritten band otherwise changes nothing until reboot. Its "up to date" verdict compares `speed_curve` and `always_full_speed` too, not only the band.

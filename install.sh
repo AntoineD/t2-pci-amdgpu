@@ -9,6 +9,8 @@
 #   - Helper scripts + t2fanrd       → /usr/local/bin/
 #   - modprobe.d, udev, dracut files → respective system dirs
 #   - Display manager drop-in        → warmfix runs before DM at boot
+#   - iMac20,x speakers: stereo sink → /etc/wireplumber/wireplumber.conf.d/
+#                                      (generated from t2-audio-wireplumber.conf.in)
 #
 # Usage: sudo ./install.sh [--dry-run] [--force-fan-conf] [--disable-wifi]
 #
@@ -400,6 +402,57 @@ elif [[ -f /etc/udev/rules.d/99-t2-wifi-off.rules || -f /etc/modprobe.d/t2-wifi-
   say "  /etc/udev/rules.d/99-t2-wifi-off.rules and /etc/modprobe.d/t2-wifi-off.conf,"
   say "  run 'echo 1 | sudo tee /sys/bus/pci/rescan', and re-run this installer"
 fi
+# Speakers: T2 cards with the 4-channel speaker layout (UCM AppleT2x4) and no
+# t2linux-audio DSP profile for the model (iMac20,x) get a stereo sink in
+# front of the 4 channels, which are two driver pairs, not front and rear.
+# See t2-audio-wireplumber.conf.in.
+T2_SPEAKERS_CONF=/etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf
+t2_speakers_why=""
+t2_audio_pci=""
+t2_speakers_changed=0
+# t2_audio_card — print the PCI address (0000:04:00.3) of the AppleT2x4 card.
+t2_audio_card() {
+  local n
+  # " 0 [Audio          ]: AppleT2x4 - Apple T2 Audio": the padded id splits
+  # into several fields, so match the driver name, not a field number.
+  n="$(awk '/\]: AppleT2x4 - / {print $1; exit}' /proc/asound/cards 2>/dev/null)"
+  [[ -n "$n" ]] || return 1
+  realpath "/sys/class/sound/card${n}/device" 2>/dev/null \
+    | grep -oE '[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]' | tail -1
+}
+mac_model="$(cat /sys/class/dmi/id/product_name 2>/dev/null)" || mac_model=""
+# t2linux-audio names its DSP profiles after the model number: iMac20,2 → 20_2.
+dsp_dir="/usr/share/t2linux-audio/$(sed 's/[^0-9]*//; s/,/_/' <<<"$mac_model")"
+if ! bdf="$(t2_audio_card)" || [[ -z "$bdf" ]]; then
+  t2_speakers_why="no T2 audio card with the 4-channel speaker layout"
+elif [[ -n "$mac_model" && -d "$dsp_dir" ]]; then
+  t2_speakers_why="t2linux-audio has a speaker DSP profile for ${mac_model}"
+elif [[ ! -f /usr/share/wireplumber/scripts/node/software-dsp.lua ]]; then
+  t2_speakers_why="WirePlumber has no software-dsp support (needs 0.5)"
+else
+  t2_audio_pci="pci-${bdf//:/_}"
+fi
+if [[ -n "$t2_audio_pci" ]]; then
+  case "$mac_model" in
+    iMacPro*)     mac_name="iMac Pro" ;;
+    iMac*)        mac_name="iMac" ;;
+    MacBookPro*)  mac_name="MacBook Pro" ;;
+    MacBookAir*)  mac_name="MacBook Air" ;;
+    Macmini*)     mac_name="Mac mini" ;;
+    *)            mac_name="Mac" ;;
+  esac
+  say "T2 speakers (${mac_model}, ${bdf}): stereo \"${mac_name} Speakers\" sink"
+  gen="$(mktemp)"
+  sed -e "s/@T2_AUDIO_PCI@/${t2_audio_pci}/g" -e "s/@MODEL@/${mac_name}/g" \
+    "${SRC_DIR}/t2-audio-wireplumber.conf.in" > "$gen"
+  cmp -s -- "$gen" "$T2_SPEAKERS_CONF" || t2_speakers_changed=1
+  install_file "$gen" "$T2_SPEAKERS_CONF"
+  rm -f -- "$gen"
+else
+  say "T2 speakers: stereo sink not needed — ${t2_speakers_why}"
+  [[ -e "$T2_SPEAKERS_CONF" ]] && t2_speakers_changed=1
+  retire_file "$T2_SPEAKERS_CONF" "$t2_speakers_why"
+fi
 install_file "${SRC_DIR}/10-amdgpu-warmfix.conf"    "${DRACUT_DIR}/10-amdgpu-warmfix.conf"
 install_file "${SRC_DIR}/20-amdgpu-t2-cmdline.conf" "${DRACUT_DIR}/20-amdgpu-t2-cmdline.conf"
 if ! (( DRY_RUN )); then
@@ -555,6 +608,11 @@ rm -f -- "$gen"
 # Done
 # ---------------------------------------------------------------------------
 say "✅ Installation complete."
+# WirePlumber reads its config when the user's session starts, not at boot.
+if (( t2_speakers_changed && ! DRY_RUN )); then
+  say "Speakers: log out and back in, or run as your user:"
+  say "  systemctl --user restart wireplumber"
+fi
 
 
 # cmdline_ok STRING — every REQUIRED_PARAMS word present, amdgpu not disabled
