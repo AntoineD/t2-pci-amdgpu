@@ -234,6 +234,14 @@ Design choices, each tried 2026-10-18:
   `Audio/*` nodes as `Audio/Sink:media.name:<name>`, so renaming `media.name` loses
   the saved volume.
 
+Expected warning, harmless: `wp-proxy: … wp_proxy_get_bound_id: runtime check failed`
+each time the raw sink goes away — at login from gdm's greeter WirePlumber (the seat
+moves to the user), at shutdown, and on a profile switch. WirePlumber 0.5.14's
+`software-dsp.lua` (line 79) reads `node["bound-id"]` in its `node-removed` hook, after
+the proxy is unbound; the filter is still freed. Any `node.software-dsp.rules` filter
+triggers it, so the config cannot avoid it. Reproduced 2026-10-18 with
+`pactl set-card-profile … off`, then back to `HiFi (Mic, Speaker)`.
+
 Verify routing by recording `<raw>.monitor` with an explicit
 `--channel-map=front-left,front-right,rear-left,rear-right` while playing L=440 Hz,
 R=880 Hz. Muting the raw sink keeps the speakers silent, and the monitor still
