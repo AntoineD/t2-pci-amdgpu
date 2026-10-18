@@ -16,6 +16,10 @@ echo
 # Only nodes under an AMD VGA function count — see t2-amd-nodes.sh.
 amd_nodes() { "$(dirname "${BASH_SOURCE[0]}")/t2-amd-nodes.sh" "$1"; }
 
+# tuned_audio_owner — "STATE FILE": what the active tuned profile does to
+# snd_hda_intel's power_save_controller — see t2-tuned-audio.sh.
+tuned_audio_owner() { "$(dirname "${BASH_SOURCE[0]}")/t2-tuned-audio.sh"; }
+
 render=$(amd_nodes renderD)
 if [[ -n "$render" ]]; then
   ok  "Render node: $render"
@@ -223,6 +227,28 @@ for aud in /sys/bus/pci/devices/*; do
   [[ "$ven" == "0x1002" && "$cls" == 0x0403* ]] || continue
   if compgen -G "$aud/sound/card*" >/dev/null; then
     ok  "HDMI/DP audio: $(basename "$aud") has a sound card"
+    # amdgpu.conf sets power_save_controller=0 so this function never
+    # runtime-suspends; tuned's [audio] plugin can set it back to Y (see
+    # t2-tuned-hda.conf.in).  tuned_audio_owner asks tuned which file decides.
+    psc=$(cat /sys/module/snd_hda_intel/parameters/power_save_controller 2>/dev/null)
+    if [[ "$psc" == Y ]]; then
+      why="something other than tuned set it back to Y"
+      if [[ "$(systemctl is-active tuned.service 2>/dev/null)" == active ]]; then
+        read -r t_state t_file < <(tuned_audio_owner)
+        case "$t_state" in
+          on)  if [[ "$t_file" == /usr/lib/* ]]; then
+                 why="tuned's stock profile $t_file resets it — re-run install.sh"
+               else
+                 why="tuned profile $t_file resets it — add '[audio] reset_controller=false' to it"
+               fi ;;
+          off) why="the active tuned profile keeps it off ($t_file) but has not been re-applied: reboot, or re-run install.sh" ;;
+          bad) why="tuned profile $t_file sets reset_controller to a value the kernel rejects, so tuned cannot clear it — use false" ;;
+          none) ;;
+          *)   why="tuned is active, but its profile files could not be read" ;;
+        esac
+      fi
+      warn "  snd_hda_intel power_save_controller=Y ($why); runtime_status=$(cat "$aud/power/runtime_status" 2>/dev/null)"
+    fi
   else
     bar=$(od -A n -t x4 -j 16 -N 4 "$aud/config" 2>/dev/null | tr -d ' ')
     if [[ "$bar" == 00000000 ]]; then

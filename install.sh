@@ -11,6 +11,8 @@
 #   - Display manager drop-in        → warmfix runs before DM at boot
 #   - iMac20,x speakers: stereo sink → /etc/wireplumber/wireplumber.conf.d/
 #                                      (generated from t2-audio-wireplumber.conf.in)
+#   - tuned profiles with [audio]    → /etc/tuned/profiles/<name>/tuned.conf
+#                                      (generated from t2-tuned-hda.conf.in)
 #
 # Usage: sudo ./install.sh [--dry-run] [--force-fan-conf] [--disable-wifi]
 #
@@ -166,6 +168,12 @@ TBT_BIOS_FILE="${STATE_DIR}/TbtOnPCH.bios"
 [[ -f "${SRC_DIR}/t2-grub-common.bash" ]] || { err "Missing ${SRC_DIR}/t2-grub-common.bash"; exit 1; }
 # shellcheck source=t2-grub-common.bash
 source "${SRC_DIR}/t2-grub-common.bash"
+# TUNED_*, tuned_is_ours, tuned_is_pristine, tuned_reload — shared with uninstall.sh.
+for f in t2-tuned.bash t2-tuned-hda.conf.in t2-tuned-audio.sh; do
+  [[ -f "${SRC_DIR}/$f" ]] || { err "Missing ${SRC_DIR}/$f"; exit 1; }
+done
+# shellcheck source=t2-tuned.bash
+source "${SRC_DIR}/t2-tuned.bash"
 
 require_root
 check_deps
@@ -452,6 +460,69 @@ else
   say "T2 speakers: stereo sink not needed — ${t2_speakers_why}"
   [[ -e "$T2_SPEAKERS_CONF" ]] && t2_speakers_changed=1
   retire_file "$T2_SPEAKERS_CONF" "$t2_speakers_why"
+fi
+# tuned: shadow each stock profile with an [audio] unit, so it stops turning
+# HDMI audio power saving back on.  See t2-tuned-hda.conf.in.  Our own files
+# are not backed up: a backup would only hold an older generated copy.  One
+# whose settings someone edited (tuned_is_pristine) is kept and judged like a
+# user's file.
+tuned_changed=0
+tuned_why=""
+[[ -n "${aud_dev:-}" && -e "${aud_dev:-}" ]] || tuned_why="no AMD HDMI audio function"
+for stock in "${TUNED_STOCK_DIR}"/*/tuned.conf; do
+  [[ -z "$tuned_why" ]] || break
+  tuned_has_audio "$stock" || continue
+  prof="$(basename "$(dirname "$stock")")"
+  dst="${TUNED_ETC_DIR}/${prof}/tuned.conf"
+  if [[ -e "$dst" ]] && ! { tuned_is_ours "$dst" && tuned_is_pristine "$dst" "$prof"; }; then
+    if tuned_is_ours "$dst"; then whose="edited copy of our override"; else whose="own profile"; fi
+    # Same verdict tuned would reach, includes and all (t2-tuned-audio.sh).
+    read -r t_state _ < <("${SRC_DIR}/t2-tuned-audio.sh" "$prof" || true) || t_state=""
+    case "$t_state" in
+      off|none) say "tuned: keeping your ${whose} ${dst} (it leaves HDMI audio awake)" ;;
+      on)  warn "tuned: keeping your ${whose} ${dst} — it resets power_save_controller to Y; set 'reset_controller=false' in its [audio] unit, or HDMI audio runtime-suspends" ;;
+      bad) warn "tuned: keeping your ${whose} ${dst} — its reset_controller value is not a boolean the kernel takes; use false" ;;
+      *)   warn "tuned: keeping your ${whose} ${dst} — could not load it with tuned to check its [audio] unit" ;;
+    esac
+    continue
+  fi
+  gen="$(mktemp)"
+  tuned_generate "$prof" > "$gen"
+  if ! cmp -s -- "$gen" "$dst"; then
+    tuned_changed=1
+    (( DRY_RUN )) || rm -f -- "$dst"   # pristine and ours: no backup (see above)
+  fi
+  install_file "$gen" "$dst"
+  rm -f -- "$gen"
+done
+# Ours, but not needed here or the stock profile no longer touches audio.
+for dst in "${TUNED_ETC_DIR}"/*/tuned.conf; do
+  tuned_is_ours "$dst" || continue
+  prof="$(basename "$(dirname "$dst")")"
+  why="$tuned_why"
+  if [[ -z "$why" ]]; then
+    tuned_has_audio "${TUNED_STOCK_DIR}/${prof}/tuned.conf" && continue
+    why="stock tuned profile '${prof}' has no [audio] unit"
+  fi
+  if ! tuned_is_pristine "$dst" "$prof"; then
+    warn "tuned: not needed (${why}), but ${dst} was edited — keeping it; delete it by hand if unwanted"
+    continue
+  fi
+  tuned_changed=1
+  if (( DRY_RUN )); then say "Would remove: ${dst} (${why})"; pending[$dst]=1; continue; fi
+  rm -f -- "$dst"
+  rmdir --ignore-fail-on-non-empty -- "$(dirname "$dst")"
+  say "Removed: ${dst} (${why})"
+done
+# Reload when an override changed (tuned keeps the profile it loaded until
+# then), or when the live value is wrong anyway.
+if systemctl is-active --quiet tuned.service; then
+  if (( tuned_changed )) || [[ "$(cat "$HDA_PSC" 2>/dev/null)" == Y ]]; then
+    tuned_reload
+    if ! (( DRY_RUN )) && [[ -z "$tuned_why" && "$(cat "$HDA_PSC" 2>/dev/null)" == Y ]]; then
+      warn "tuned: power_save_controller still reads Y — amdgpu-check.sh names the profile that sets it"
+    fi
+  fi
 fi
 install_file "${SRC_DIR}/10-amdgpu-warmfix.conf"    "${DRACUT_DIR}/10-amdgpu-warmfix.conf"
 install_file "${SRC_DIR}/20-amdgpu-t2-cmdline.conf" "${DRACUT_DIR}/20-amdgpu-t2-cmdline.conf"

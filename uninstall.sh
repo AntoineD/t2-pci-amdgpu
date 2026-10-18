@@ -37,6 +37,9 @@ done
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=t2-grub-common.bash
 source "${SRC_DIR}/t2-grub-common.bash" || { err "Missing ${SRC_DIR}/t2-grub-common.bash"; exit 1; }
+[[ -f "${SRC_DIR}/t2-tuned-hda.conf.in" ]] || { err "Missing ${SRC_DIR}/t2-tuned-hda.conf.in"; exit 1; }
+# shellcheck source=t2-tuned.bash
+source "${SRC_DIR}/t2-tuned.bash" || { err "Missing ${SRC_DIR}/t2-tuned.bash"; exit 1; }
 
 ACPI_IMG="/boot/${ACPI_IMG_NAME}"
 
@@ -178,6 +181,28 @@ if [[ -e /etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf ]]; then
   offer_restore "/etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf"
   say "Speakers: log out and back in, or run 'systemctl --user restart wireplumber' as your user"
 fi
+# tuned overrides from t2-tuned-hda.conf.in.  Only files carrying our marker
+# go, so a profile the user wrote under the same name stays; and only while
+# their settings are still the generated ones (tuned_is_pristine), so an edit
+# made to our file, or kept in one of its backups, is not lost.
+tuned_removed=0
+for d in "${TUNED_ETC_DIR}"/*/; do
+  [[ -d "$d" ]] || continue   # no nullglob here: an unmatched glob stays literal
+  prof="$(basename "$d")"
+  removed_here=0
+  for f in "${d}tuned.conf" "${d}"tuned.conf.bak.*; do
+    tuned_is_ours "$f" || continue
+    if tuned_is_pristine "$f" "$prof"; then
+      remove_file "$f"
+      removed_here=1
+      if [[ "$f" == "${d}tuned.conf" ]]; then tuned_removed=1; fi
+    else
+      warn "Keeping ${f}: its settings were edited — delete it by hand if unwanted"
+    fi
+  done
+  if (( removed_here && ! DRY_RUN )); then rmdir --ignore-fail-on-non-empty -- "$d"; fi
+done
+(( tuned_removed )) && tuned_reload
 offer_restore "/etc/dracut.conf.d/10-amdgpu-warmfix.conf"
 offer_restore "/etc/dracut.conf.d/20-amdgpu-t2-cmdline.conf"
 
