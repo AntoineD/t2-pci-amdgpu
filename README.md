@@ -1,10 +1,10 @@
 # AMDGPU Warmfix for Mac Intel (T2)
 
 Stabilizes AMD GPU initialization on Apple T2 iMac running Linux.
-Developed and tested on **iMac20,2** (i7-10700K + Navi10 / Radeon Pro 5700 XT).
+Developed and tested on **iMac20,2** (i7-10700K + Navi 10 / Radeon Pro 5700).
 Should also work on other Mac Intel T2 models with AMD GPUs.
 
-**Tested on:** Fedora 43
+**Tested on:** Fedora 43 and 44, t2linux kernels 7.1.x–7.2.x
 
 ---
 
@@ -15,9 +15,9 @@ The fix operates in five layers, from earliest to latest in the boot sequence:
 | Layer | What | When | Why |
 | --- | --- | --- | --- |
 | **ACPI override** | Injects `_PR3`/`_DSM` stubs into the GPU ACPI device | Early initrd (before kernel) | Apple's ACPI tables omit the power-resource and device-specific methods the Linux AMDGPU driver expects; without them the PCI link comes up in an undefined state and the driver fails to initialize |
-| **modprobe.d** | Sets `amdgpu.aspm=0`, `amdgpu.runpm=0`, `snd_hda_intel.power_save_controller=0`, blacklists `radeon` | Module load | Keeps amdgpu from setting up ASPM itself and disables runtime power management, so neither GPU function can be powered down after its driver claims it; blacklisting `radeon` prevents it from racing `amdgpu`. Neither this nor `pcie_aspm=off` turns off the ASPM L1 that Apple's firmware enables on the GPU link |
+| **modprobe.d** | Sets `amdgpu.aspm=0`, `amdgpu.runpm=0`, `snd_hda_intel.power_save_controller=0`, blacklists `radeon`; on Navi 10 iMacs also `amdgpu.ppfeaturemask=0xfff7bffd` | Module load | Keeps amdgpu from setting up ASPM itself and disables runtime power management, so neither GPU function can be powered down after its driver claims it; blacklisting `radeon` prevents it from racing `amdgpu`. On Navi 10 iMacs the feature mask keeps the GPU's power-management controller from hanging on cold boots, so the GPU comes up on its first probe. Neither this nor `pcie_aspm=off` turns off the ASPM L1 that Apple's firmware enables on the GPU link |
 | **udev rule** | Pins GPU PCI functions to `power/control=on`; sets the DPM level (`low` unless changed, see [GPU performance level](#gpu-performance-level)) | Device bind / driver load | PCIe runtime PM can suspend the GPU between the ACPI fix and the driver binding; pinning the power state to `on` closes that window. |
-| **Warmfix service** | PCI remove → rescan with retry + readiness check; skipped when amdgpu's cold probe already succeeded | systemd, before display manager | Forcing the PCI bus to re-enumerate the GPU slot makes the kernel re-read its BARs and re-run PCI init cleanly; the retry handles the ~15 s corruption case where the first init attempt fails |
+| **Warmfix service** | PCI remove → rescan with retry + readiness check; skipped when amdgpu's cold probe already succeeded, which on Navi 10 iMacs is now the normal case | systemd, before display manager | Forcing the PCI bus to re-enumerate the GPU slot makes the kernel re-read its BARs and re-run PCI init cleanly; the retry handles the ~15 s corruption case where the first init attempt fails |
 | **DM drop-in** | Ensures display manager starts only after warmfix | systemd ordering | Without explicit ordering, GDM can race the warmfix and start against an uninitialised GPU, producing a black screen or failed compositor |
 
 The same ACPI override image also carries a patched copy of Apple's Thunderbolt
@@ -33,8 +33,9 @@ table, which takes ~9 s off every resume from suspend — see
 | File | Description |
 | --- | --- |
 | `install.sh` | Main installer — runs all steps below |
-| `uninstall.sh` | Removes all installed files, disables services, then prints the GRUB and initramfs cleanup steps this system still needs. `--all` also removes `/boot/acpi_override.img`, `/etc/t2fand.conf` and `/etc/t2-pci-amdgpu.conf`, but keeps the image while GRUB still loads it: GRUB loads no initramfs at all when one of its files is missing, and the system would not boot. `--dry-run` previews everything. |
+| `uninstall.sh` | Removes all installed files, disables services, then prints the GRUB and initramfs cleanup steps this system still needs. `--all` also removes `/boot/acpi_override.img`, `/etc/t2fand.conf`, `/etc/t2-pci-amdgpu.conf` and `/var/lib/t2-pci-amdgpu`, but keeps the image while GRUB still loads it: GRUB loads no initramfs at all when one of its files is missing, and the system would not boot. `--dry-run` previews everything. |
 | `t2-grub-common.bash` | GRUB helpers sourced by both scripts (not installed) |
+| `t2-tuned.bash` | tuned override helpers sourced by both scripts (not installed) |
 | `amdgpu-reset-pci-template` | Template for the PCI reset script; `ADDR` is replaced with the detected slot at install time |
 
 ### Systemd units
@@ -45,21 +46,25 @@ table, which takes ~9 s off every resume from suspend — see
 | `t2fanrd-dropin.conf` | `/etc/systemd/system/t2fanrd.service.d/10-t2-pci-amdgpu.conf` | When the t2linux `t2fanrd` package is installed (`/usr/bin/t2fanrd`): adds to the package's own unit the wait for the fan attribute, `RestartSec=5`, ordering after `applesmc-late`, and handing the fan back to the SMC on stop. The package's sandboxed unit and newer build are used as they are. |
 | `t2fanrd.service` | `/etc/systemd/system/` | Fallback without the package: runs the bundled T2 fan daemon |
 | `t2fanrd-resume.service` | `/etc/systemd/system/` | Restarts `t2fanrd` after resume — the SMC drops manual fan control across S3, so without this the fan runs loud until the daemon is restarted by hand |
-| `applesmc-late.service` | `/etc/systemd/system/` | Loads `applesmc` once the `apple-bce` PCI driver has bound |
+| `applesmc-late.service` | `/etc/systemd/system/` | Loads `applesmc` once the T2 bridge driver has bound (`t2bce_core`; `apple-bce` before the 7.1 t2 kernel) |
 
 None of these units order themselves after `systemd-udev-settle.service`. It is
 deprecated — systemd logs `systemd-udev-settle.service is deprecated. Please fix
 <unit> not to pull it in` and names the offenders — it cost 0.77 s of boot on
 iMac20,2, and draining the coldplug queue never actually guaranteed that the
 device a given unit needs is present. Each unit now waits on its own precondition:
-`apple-bce` binding, the `fan1_manual` attribute, or the GPU's PCI node.
+the T2 bridge binding, the `fan1_manual` attribute, or the GPU's PCI node.
 
 ### Scripts and binaries
 
 | File | Installed to | Description |
 | --- | --- | --- |
-| `amdgpu-check.sh` | `/usr/local/bin/` | Health check: render node, module state, installed kernels with the broken `imac5k_table` quirk, PCI power state, warmfix log, GPU DPM level/clocks/temperatures/power, HDMI/DP audio, the fan daemon (binary, restarts, `fan1_manual`, RPM and the daemon's speed limit) and the CPU power profile. Offers live warmfix re-trigger if GPU is missing (requires root). |
+| `amdgpu-check.sh` | `/usr/local/bin/` | Health check: render node, module state, installed kernels with the broken `imac5k_table` quirk, PCI power state, warmfix log, GPU DPM level/clocks/temperatures/power, the Navi 10 feature mask in effect, HDMI/DP audio (including whether a tuned profile turned its power saving back on, and which file did), the fan daemon (binary, restarts, `fan1_manual`, RPM and the daemon's speed limit) and the tuned profile. Offers live warmfix re-trigger if GPU is missing (requires root). |
 | `t2-gpu-status.sh` | `/usr/local/bin/` | Quick GPU and service status snapshot |
+| `amdgpu-pci-reset-load.sh` | `/usr/local/bin/` (generated) | The warmfix itself, generated from `amdgpu-reset-pci-template` for the detected GPU slot; run by `amdgpu-warmfix.service` |
+| `t2-unit-state.sh` | `/usr/local/bin/` | Unit list and per-unit state (`ran-once`, `not-run`, …) shared by `amdgpu-check.sh` and `t2-gpu-status.sh` |
+| `t2-amd-nodes.sh` | `/usr/local/bin/` | Lists the DRM nodes under an AMD VGA function; shared by `amdgpu-check.sh` and `t2-gpu-status.sh` |
+| `t2-tuned-audio.sh` | `/usr/local/bin/` | Prints what a tuned profile (the active one by default) does to `snd_hda_intel power_save_controller`, and which profile file decides it. Uses tuned's own loader, so includes and unit priorities resolve as in tuned. Called by `amdgpu-check.sh` and `install.sh` |
 | `t2-gpu-dpm.sh` | `/usr/local/bin/` | Shows or sets the GPU's DPM level (`low`, `auto`, `high`). Setting it saves `T2_GPU_DPM` in `/etc/t2-pci-amdgpu.conf` for every boot and applies it at once. See [GPU performance level](#gpu-performance-level) |
 | `t2-wait-sysfs.sh` | `/usr/local/bin/` | Blocks until a sysfs path matching any given glob appears. Used as `ExecStartPre=` in place of `udevadm settle` — waits for the one device the unit needs instead of the whole coldplug queue |
 | `t2fanrd` | `/usr/local/bin/` | Fallback without the package: prebuilt T2 fan controller daemon — [GnomedDev/T2FanRD](https://github.com/GnomedDev/T2FanRD). With the package installed, the installer removes any copy here (backed up) |
@@ -75,6 +80,7 @@ device a given unit needs is present. Each unit now waits on its own preconditio
 | `99-t2-wifi-off.rules` | `/etc/udev/rules.d/` | Only with `install.sh --disable-wifi`. Removes the Wi-Fi (ACPI `ARPT`) and its root port from the PCI tree at boot, so Apple's 1 s link waits on that port no longer run on every suspend and resume. Bluetooth is unaffected — it is on the UART. |
 | `t2-wifi-off.conf` | `/etc/modprobe.d/` | Only with `install.sh --disable-wifi`. Blacklists `brcmfmac`, which without Apple's firmware files only fails its probe and logs a `__flush_work` warning every boot. |
 | `t2-audio-wireplumber.conf.in` | `/etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf` (generated) | Only on T2 Macs whose speakers are one 4-channel output and that have no t2linux-audio speaker profile (iMac20,x). Adds a stereo "iMac Speakers" output in front of it and gives the card, mic and raw speaker output clearer names. See [Speaker sound](#speaker-sound). |
+| `t2-tuned-hda.conf.in` | `/etc/tuned/profiles/<name>/tuned.conf` (generated) | Only when tuned is installed and the GPU has an HDMI audio function: one per stock profile with an `[audio]` section (`balanced`, `powersave`). Includes the stock profile and stops tuned from turning `snd_hda_intel power_save_controller` back on, which would let the GPU's HDMI audio function runtime-suspend. A same-name profile you wrote, or a generated one whose settings you edited, is left alone, and the installer says whether it still keeps the audio function awake. |
 | `10-amdgpu-warmfix.conf` | `/etc/dracut.conf.d/` | Embeds `amdgpu`, `nvme` and `thunderbolt` in the initramfs via `force_drivers`. Every name must resolve to a real module — `force_drivers` makes a missing one a fatal `dracut -f` error |
 | `20-amdgpu-t2-cmdline.conf` | `/etc/dracut.conf.d/` | Embeds kernel params as initramfs fallback (used only when bootloader passes no cmdline) |
 
@@ -101,17 +107,27 @@ The installer will:
 
 1. Build `/boot/acpi_override.img` from `GFXALT-multi.aml` and a patched copy of
    Apple's `TbtOnPCH` table (rebuilt every run, replaced only if it changed)
-2. Install all `*.service` units to `/etc/systemd/system/`
+2. Install all `*.service` units to `/etc/systemd/system/`, or, when the t2linux
+   `t2fanrd` package is installed, use its unit with a drop-in and retire this
+   repo's copy
 3. Auto-detect the AMD GPU PCI slot and generate `/usr/local/bin/amdgpu-pci-reset-load.sh`
 4. Install scripts to `/usr/local/bin/`, plus the bundled `t2fanrd` binary when the t2linux `t2fanrd` package is not installed
-5. Install `modprobe.d`, `udev`, and `dracut` config files
-6. Create `/etc/t2fand.conf`, or reconcile an existing one (see below)
+5. Install `modprobe.d`, `udev`, and `dracut` config files, and only where they
+   apply: the Navi 10 feature mask, the stereo speaker filter and the tuned
+   overrides
+6. Create `/etc/t2fand.conf`, or reconcile an existing one (see below), and
+   restart a running `t2fanrd` so the change takes effect
 7. Enable `amdgpu-warmfix`, `t2fanrd`, `t2fanrd-resume`, and `applesmc-late` services
 8. Create a display manager drop-in so the DM starts after warmfix
+9. End with an "Action required" list of only the steps this system still
+   needs (GRUB edits, `grubby`, `dracut`, reboot), or "No action required"
 
 Existing files are backed up as `<file>.bak.YYYYMMDD-HHMMSS` before replacement.
+The generated tuned overrides are the exception: a backup would only hold an
+older generated copy. Re-running the installer changes nothing that is already
+up to date.
 
-> **Note:** The T2Linux patched kernel (providing `apple_bce`, `applesmc`) must already be installed.
+> **Note:** The T2Linux patched kernel (providing the T2 bridge driver, `t2bce_core` or `apple_bce` on older kernels, and `applesmc`) must already be installed.
 
 ---
 
@@ -177,7 +193,7 @@ sudo grubby --update-kernel=ALL --args="pci=noaer pcie_aspm=off amdgpu.aspm=0 am
 sudo grubby --update-kernel=ALL --remove-args=nomodeset
 ```
 
-The installer prints the right commands for your system at the end of installation.
+The installer's closing "Action required" list gives the exact commands for your system, and only the ones still needed.
 
 ---
 
@@ -195,10 +211,12 @@ journalctl -k -b | grep -E "Table Upgrade|GFXALT|TbtOnPCH"
 Use the journal rather than `dmesg`: the kernel's 256 KB log buffer wraps, and
 after a few hours of uptime these early-boot lines are gone from it.
 
-**2. Kernel cmdline:**
+**2. Kernel cmdline** (`acpi_override.img` never shows here: GRUB loads it as an
+early initrd, not as a parameter):
 
 ```bash
-cat /proc/cmdline | grep acpi_override.img
+grep -oE 'pci=noaer|pcie_aspm=off|amdgpu\.aspm=0|amdgpu\.runpm=0' /proc/cmdline
+# want all four
 ```
 
 **3. Full GPU health check:**
@@ -276,7 +294,7 @@ Run `sudo amdgpu-check.sh` — it will report the state of each layer and offer 
 
 **Wrong PCI slot targeted:**
 The GPU is usually at a fixed slot (e.g. `0000:03:00.0` VGA, `0000:03:00.1` audio).
-Verify with `lspci -nn | grep VGA`. If the slot is wrong, edit `/usr/local/bin/amdgpu-pci-reset-load.sh` manually.
+Verify with `lspci -nn | grep VGA`. The installer detects the slot on every run, so re-run `sudo ./install.sh` after a hardware change; a manual edit of `/usr/local/bin/amdgpu-pci-reset-load.sh` is overwritten by the next install.
 
 **Fan loud and unrelated to CPU load** (ramps at idle, ignores a cool package):
 `t2fanrd` is not running, so the SMC is driving the fan on its own firmware
@@ -363,8 +381,8 @@ cat /sys/bus/acpi/devices/APP0001:*/fan1_manual # expect: 1 while t2fanrd runs
 
 ```bash
 systemctl status amdgpu-warmfix.service
-# verify the drop-in exists:
-ls /etc/systemd/system/gdm.service.d/10-amdgpu-warmfix.conf
+# verify the display manager has the drop-in (gdm.service.d/10-amdgpu-warmfix.conf on GNOME):
+systemctl show display-manager.service -p DropInPaths
 ```
 
 ---
@@ -511,12 +529,12 @@ channel only 880 Hz, at equal levels.
 - On a boot where the warmfix has to reset the GPU, HDMI/DP audio is lost until the next boot: the reset wipes the GPU's audio function. With the setting above this should no longer happen on Navi 10 iMacs.
 - On first-attempt GPU init failure, the screen may show a horizontal corruption artifact for ~15–20 seconds. The warmfix retries automatically and the driver loads correctly.
 - After such an event, rebooting into macOS may trigger 1–2 crash reports (`remoted` watchdog) and one automatic reboot within the first 5 minutes. macOS then runs normally.
-- Maximum resolution is 4K — 5K is not supported by `amdgpu`.
+- On the 7.2.8 t2 kernel the 5K panel tops out at 3840×2160. The 7.2.9-310.t2 kernels drive it at 5120×2880 as two tiles, but on iMac20,2 that showed flickering lines around the cursor, and those kernels' new iMac quirk table (`imac5k_table`) has no terminator. The fc43 build oopsed the GPU probe on every boot, and the fc44 build booted only by luck. `amdgpu-check.sh` flags any installed kernel with the broken table. Stay on 7.2.8 until a fixed kernel ships.
 
 ---
 
 ## Notes
 
-- Developed on Fedora 43, iMac20,2 (EFI boot).
+- Developed on Fedora 43, now running Fedora 44, iMac20,2 (EFI boot).
 - Should work on other T2 Macs with AMD GPUs — feedback welcome.
 - `t2fanrd` binary: SHA256 `32612f571e8de56497c7c36dc32b4f6ba85cd25888afd5bb25c6de735f5fe52f`, built with rustc 1.87.0 from [GnomedDev/T2FanRD](https://github.com/GnomedDev/T2FanRD) before its April 2026 fixes. Upstream publishes no releases or tags, so there is nothing to check the hash against. It is only a fallback: on Fedora, install the t2linux COPR's `t2fanrd` package (`/usr/bin/t2fanrd`), a newer build that logs only to a terminal instead of flooding the journal, and the installer uses it instead.
