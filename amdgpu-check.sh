@@ -49,9 +49,10 @@ fi
 
 # --- Installed kernels with the broken imac5k_table quirk ---------------------
 # 7.2.9-310.t2 added an iMac20,x DMI quirk table, imac5k_table, without its {}
-# terminator: 0x2b0 bytes = 2 x 344-byte entries and no sentinel.  The amdgpu
-# probe reads past it, oopses and dies holding the device lock, and no
-# userspace step recovers that boot.  Flag such a kernel before it is booted.
+# terminator: 0x2b0 bytes = 2 x 344-byte entries and no sentinel, so
+# dmi_check_system() reads past it.  Depending on the build that oopses the
+# probe or boots into a flickering 5K mode (CLAUDE.md, layer 4).  Flag such a
+# kernel before it is booted.
 # Only 0x2b0 is known broken; any other size is reported but not judged.
 echo
 say "Installed kernels (amdgpu imac5k_table quirk):"
@@ -92,7 +93,7 @@ else
     elif [[ -z "$size" ]]; then
       ok  "$kver$tags: no imac5k_table"
     elif [[ "$size" == "2b0" ]]; then
-      fail "$kver$tags: BROKEN imac5k_table (0x2b0, no terminator) — GPU probe oopses; do not boot it"
+      fail "$kver$tags: BROKEN imac5k_table (0x2b0, no terminator) — reads past the table; may oops at probe or flicker in 5K mode"
       [[ "$kver" == "$default_kver" ]] && \
         fail "  It is the GRUB default. Pick another: grubby --set-default /boot/vmlinuz-<good version>"
     else
