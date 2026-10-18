@@ -1,16 +1,41 @@
-# AMDGPU Warmfix for Mac Intel (T2)
+# Linux fixes for Intel T2 Macs
 
-Stabilizes AMD GPU initialization on Apple T2 iMac running Linux.
-Developed and tested on **iMac20,2** (i7-10700K + Navi 10 / Radeon Pro 5700).
-Should also work on other Mac Intel T2 models with AMD GPUs.
+An Intel Mac with Apple's T2 chip runs Linux with the t2linux kernel, but some
+things still go wrong: the graphics card may not start, the fan can roar or
+stay loud after sleep, waking from sleep is slow, plugged-in USB devices can
+go unnoticed, and the iMac's speakers sound odd. This repo fixes those with
+one installer, and installs each model-specific part only on hardware that
+needs it.
 
-**Tested on:** Fedora 43 and 44, t2linux kernels 7.1.x–7.2.x
+Developed and tested on an **iMac20,2** (i7-10700K, Radeon Pro 5700). Most of
+it should work on other T2 Macs with an AMD GPU.
+
+**Tested on:** Fedora 43 and 44, t2linux kernels 7.1.x–7.2.x. A t2linux kernel
+must already be installed.
+
+| What you notice | What the fix does | Details |
+| --- | --- | --- |
+| Black screen or no graphics acceleration after boot, or a corrupted screen for 15–20 s | Brings the AMD GPU up reliably on every boot | [The GPU does not start reliably](#the-gpu-does-not-start-reliably) |
+| Fan loud at idle, loud after waking from sleep, or roaring under light load | Runs the fan daemon with a sensible curve and keeps it in control | [Fan noise](#fan-noise) |
+| Waking from sleep takes about 10 s | Cuts about 9 s of it, and the rest with Wi-Fi turned off | [Slow wake from sleep](#slow-wake-from-sleep) |
+| A USB device you plug in does not show up | Keeps the USB hubs awake | [USB devices not appearing](#usb-devices-not-appearing) |
+| iMac speakers: voices muffled or from one side, music hollow | Adds a proper stereo speaker output | [Speakers sound wrong](#speakers-sound-wrong-imac20x) |
 
 ---
 
-## How it works
+## The GPU does not start reliably
 
-The fix operates in five layers, from earliest to latest in the boot sequence:
+**What you see:** on some boots the screen stays black, or the desktop comes
+up without graphics acceleration. A boot can also show a band of corrupted
+picture for 15–20 s before the screen recovers. Starting from power off is the
+worst case: on iMac20,2, 18 of 29 such boots had the GPU fail its first start.
+
+**Why:** Apple's ACPI tables leave out power methods the Linux `amdgpu` driver
+expects, so the GPU's PCI link can come up in an undefined state. On iMacs with
+a Navi 10 GPU (Radeon Pro 5700 / 5700 XT) the GPU's power-management
+controller can also hang at start-up; on iMac20,2 it did on most cold starts.
+
+**What the fix does:** five steps, from earliest to latest in the boot:
 
 | Layer | What | When | Why |
 | --- | --- | --- | --- |
@@ -20,77 +45,85 @@ The fix operates in five layers, from earliest to latest in the boot sequence:
 | **Warmfix service** | PCI remove → rescan with retry + readiness check; skipped when amdgpu's cold probe already succeeded, which on Navi 10 iMacs is now the normal case | systemd, before display manager | Forcing the PCI bus to re-enumerate the GPU slot makes the kernel re-read its BARs and re-run PCI init cleanly; the retry handles the ~15 s corruption case where the first init attempt fails |
 | **DM drop-in** | Ensures display manager starts only after warmfix | systemd ordering | Without explicit ordering, GDM can race the warmfix and start against an uninitialised GPU, producing a black screen or failed compositor |
 
-The same ACPI override image also carries a patched copy of Apple's Thunderbolt
-table, which takes ~9 s off every resume from suspend — see
-[Slow resume from suspend](#slow-resume-from-suspend).
+On iMac20,2 the GPU now comes up on its first try (9 of 9 cold boots
+tested), so the warmfix normally only confirms that and steps aside. It stays
+installed as the safety net.
 
----
+Trade-offs:
 
-## File overview
+- The GPU runs at its lowest clock by default: cool and quiet, but slow in
+  games. One command changes that: see [GPU performance level](#gpu-performance-level).
+- On Navi 10 iMacs the memory clock no longer scales up (see [Known issues](#known-issues)).
+- `amdgpu.conf` keeps the GPU's HDMI/DP audio function powered. tuned's stock
+  `balanced` and `powersave` profiles undo that, so the installer adds a small
+  override for each.
 
-### Installer
+## Fan noise
 
-| File | Description |
-| --- | --- |
-| `install.sh` | Main installer — runs all steps below |
-| `uninstall.sh` | Removes all installed files, disables services, then prints the GRUB and initramfs cleanup steps this system still needs. `--all` also removes `/boot/acpi_override.img`, `/etc/t2fand.conf`, `/etc/t2-pci-amdgpu.conf` and `/var/lib/t2-pci-amdgpu`, but keeps the image while GRUB still loads it: GRUB loads no initramfs at all when one of its files is missing, and the system would not boot. `--dry-run` previews everything. |
-| `t2-grub-common.bash` | GRUB helpers sourced by both scripts (not installed) |
-| `t2-tuned.bash` | tuned override helpers sourced by both scripts (not installed) |
-| `amdgpu-reset-pci-template` | Template for the PCI reset script; `ADDR` is replaced with the detected slot at install time |
+**What you see:** one of these:
 
-### Systemd units
+- The fan is loud at idle and rises and falls with no link to what the
+  computer is doing.
+- The fan is fine until the Mac wakes from sleep, then stays loud.
+- One or two busy programs are enough to send the fan to full speed.
 
-| File | Installed to | Description |
-| --- | --- | --- |
-| `amdgpu-warmfix.service` | `/etc/systemd/system/` | Runs the PCI reset at boot, before the display manager, if amdgpu's cold probe failed. Skips itself when `nomodeset` is set without an `amdgpu.modeset` override. |
-| `t2fanrd-dropin.conf` | `/etc/systemd/system/t2fanrd.service.d/10-t2-pci-amdgpu.conf` | When the t2linux `t2fanrd` package is installed (`/usr/bin/t2fanrd`): adds to the package's own unit the wait for the fan attribute, `RestartSec=5`, ordering after `applesmc-late`, and handing the fan back to the SMC on stop. The package's sandboxed unit and newer build are used as they are. |
-| `t2fanrd.service` | `/etc/systemd/system/` | Fallback without the package: runs the bundled T2 fan daemon |
-| `t2fanrd-resume.service` | `/etc/systemd/system/` | Restarts `t2fanrd` after resume — the SMC drops manual fan control across S3, so without this the fan runs loud until the daemon is restarted by hand |
-| `applesmc-late.service` | `/etc/systemd/system/` | Loads `applesmc` once the T2 bridge driver has bound (`t2bce_core`; `apple-bce` before the 7.1 t2 kernel) |
+**Why:** without a fan daemon, the T2's firmware drives the fan from chassis
+sensors, not from the CPU. The daemon (`t2fanrd`) takes over, but the firmware
+takes control back across every sleep. Older setups also wrote the daemon's
+config to a file it never reads, and used a temperature band so narrow that
+the fan saturated almost at once.
 
-None of these units order themselves after `systemd-udev-settle.service`. It is
-deprecated — systemd logs `systemd-udev-settle.service is deprecated. Please fix
-<unit> not to pull it in` and names the offenders — it cost 0.77 s of boot on
-iMac20,2, and draining the coldplug queue never actually guaranteed that the
-device a given unit needs is present. Each unit now waits on its own precondition:
-the T2 bridge binding, the `fan1_manual` attribute, or the GPU's PCI node.
+**What the fix does:**
 
-### Scripts and binaries
+- Uses the t2linux `t2fanrd` package when it is installed, or a bundled build
+  otherwise.
+- Writes `/etc/t2fand.conf` (the path the daemon actually reads) with a
+  60–90 °C curve. It replaces bands this project used to ship and leaves any
+  other values you set alone.
+- Restarts the daemon after every wake so it takes the fan back.
+- Waits for the fan's control file before starting the daemon, instead of
+  failing and handing the fan back to the firmware.
 
-| File | Installed to | Description |
-| --- | --- | --- |
-| `amdgpu-check.sh` | `/usr/local/bin/` | Health check: render node, module state, installed kernels with the broken `imac5k_table` quirk, PCI power state, warmfix log, GPU DPM level/clocks/temperatures/power, the Navi 10 feature mask in effect, HDMI/DP audio (including whether a tuned profile turned its power saving back on, and which file did), the fan daemon (binary, restarts, `fan1_manual`, RPM and the daemon's speed limit) and the tuned profile. Offers live warmfix re-trigger if GPU is missing (requires root). |
-| `t2-gpu-status.sh` | `/usr/local/bin/` | Quick GPU and service status snapshot |
-| `amdgpu-pci-reset-load.sh` | `/usr/local/bin/` (generated) | The warmfix itself, generated from `amdgpu-reset-pci-template` for the detected GPU slot; run by `amdgpu-warmfix.service` |
-| `t2-unit-state.sh` | `/usr/local/bin/` | Unit list and per-unit state (`ran-once`, `not-run`, …) shared by `amdgpu-check.sh` and `t2-gpu-status.sh` |
-| `t2-amd-nodes.sh` | `/usr/local/bin/` | Lists the DRM nodes under an AMD VGA function; shared by `amdgpu-check.sh` and `t2-gpu-status.sh` |
-| `t2-tuned-audio.sh` | `/usr/local/bin/` | Prints what a tuned profile (the active one by default) does to `snd_hda_intel power_save_controller`, and which profile file decides it. Uses tuned's own loader, so includes and unit priorities resolve as in tuned. Called by `amdgpu-check.sh` and `install.sh` |
-| `t2-gpu-dpm.sh` | `/usr/local/bin/` | Shows or sets the GPU's DPM level (`low`, `auto`, `high`). Setting it saves `T2_GPU_DPM` in `/etc/t2-pci-amdgpu.conf` for every boot and applies it at once. See [GPU performance level](#gpu-performance-level) |
-| `t2-wait-sysfs.sh` | `/usr/local/bin/` | Blocks until a sysfs path matching any given glob appears. Used as `ExecStartPre=` in place of `udevadm settle` — waits for the one device the unit needs instead of the whole coldplug queue |
-| `t2fanrd` | `/usr/local/bin/` | Fallback without the package: prebuilt T2 fan controller daemon — [GnomedDev/T2FanRD](https://github.com/GnomedDev/T2FanRD). With the package installed, the installer removes any copy here (backed up) |
+Checks and fixes are under [Troubleshooting](#troubleshooting).
 
-### Config files
+## Slow wake from sleep
 
-| File | Installed to | Description |
-| --- | --- | --- |
-| `amdgpu.conf` | `/etc/modprobe.d/` | Sets `amdgpu.aspm=0` and `amdgpu.runpm=0` at module level; blacklists `radeon`; sets `snd_hda_intel.power_save_controller=0` so the GPU's HDMI audio function stays out of runtime suspend |
-| `amdgpu-navi10-imac.conf` | `/etc/modprobe.d/` | Only on iMac20,x with a Navi 10 GPU (Radeon Pro 5700 / 5700 XT). Sets `amdgpu.ppfeaturemask=0xfff7bffd`, which keeps memory-clock scaling out of the power-management controller's start-up request. Without it, that controller hangs on most cold boots, and the GPU only came up after the warmfix's reset, ~6 s later and without HDMI/DP audio. With it, 9 of 9 cold boots came up first time. Cost: the memory clock cannot scale up under load. |
-| `99-amdgpu-t2.rules` | `/etc/udev/rules.d/` | Pins the AMD VGA function to `power/control=on` at device bind; sets the DPM level saved in `/etc/t2-pci-amdgpu.conf` (`low` when there is none); records amdgpu's successful bind (`AMDGPU_WARMFIX_BOUND=1`) so the warmfix can stop waiting for the probe. Also targets the HDMI audio function, but that write is best-effort — `snd_hda_intel` resets it to `auto` when it binds, which is why the module option above exists |
-| `99-t2-usb.rules` | `/etc/udev/rules.d/` | Pins USB root hubs (`idVendor=1d6b`, hub class `09`) to `power/control=on`. T2 xHCI hubs autosuspend aggressively and stop reporting device attach events; pinning the root hubs awake fixes USB-to-Ethernet adapters and similar devices not appearing in `lsusb`. |
-| `99-t2-wifi-off.rules` | `/etc/udev/rules.d/` | Only with `install.sh --disable-wifi`. Removes the Wi-Fi (ACPI `ARPT`) and its root port from the PCI tree at boot, so Apple's 1 s link waits on that port no longer run on every suspend and resume. Bluetooth is unaffected — it is on the UART. |
-| `t2-wifi-off.conf` | `/etc/modprobe.d/` | Only with `install.sh --disable-wifi`. Blacklists `brcmfmac`, which without Apple's firmware files only fails its probe and logs a `__flush_work` warning every boot. |
-| `t2-audio-wireplumber.conf.in` | `/etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf` (generated) | Only on T2 Macs whose speakers are one 4-channel output and that have no t2linux-audio speaker profile (iMac20,x). Adds a stereo "iMac Speakers" output in front of it and gives the card, mic and raw speaker output clearer names. See [Speaker sound](#speaker-sound). |
-| `t2-tuned-hda.conf.in` | `/etc/tuned/profiles/<name>/tuned.conf` (generated) | Only when tuned is installed and the GPU has an HDMI audio function: one per stock profile with an `[audio]` section (`balanced`, `powersave`). Includes the stock profile and stops tuned from turning `snd_hda_intel power_save_controller` back on, which would let the GPU's HDMI audio function runtime-suspend. A same-name profile you wrote, or a generated one whose settings you edited, is left alone, and the installer says whether it still keeps the audio function awake. |
-| `10-amdgpu-warmfix.conf` | `/etc/dracut.conf.d/` | Embeds `amdgpu`, `nvme` and `thunderbolt` in the initramfs via `force_drivers`. Every name must resolve to a real module — `force_drivers` makes a missing one a fatal `dracut -f` error |
-| `20-amdgpu-t2-cmdline.conf` | `/etc/dracut.conf.d/` | Embeds kernel params as initramfs fallback (used only when bootloader passes no cmdline) |
+**What you see:** after waking the Mac from sleep, about 10 seconds pass
+before the screen and keyboard respond.
 
-### ACPI
+**Why:** Apple's firmware runs its macOS power-up steps for the Thunderbolt
+controller and the Wi-Fi port on every wake. Under Linux those steps wait for
+replies that never come, and only give up on timeouts.
 
-| File | Description |
-| --- | --- |
-| `GFXALT-multi.aml` | Compiled ACPI SSDT — packed into `/boot/acpi_override.img` by the installer |
-| `GFXALT-multi.dsl` | Source for the above. To recompile: `iasl -ve -tc GFXALT-multi.dsl` |
-| `t2-tbt-acpi-patch.py` | Run by the installer: reads Apple's `TbtOnPCH` SSDT from `/sys/firmware/acpi/tables`, patches two methods, and the result goes into the same image. No Apple code is shipped in this repo. |
+**What the fix does:** the installer patches Apple's Thunderbolt table from
+the live firmware, so its waits end at once, which saves about 9 s. If you do
+not use Wi-Fi, `install.sh --disable-wifi` also removes the Wi-Fi port and its
+1 s wait on both sleep and wake. With both, a wake on iMac20,2 went from
+10.1 s to 0.68 s. See
+[Wake from sleep: the patch in detail](#wake-from-sleep-the-patch-in-detail).
+
+## USB devices not appearing
+
+**What you see:** a USB device you plug in, such as a USB-to-Ethernet adapter,
+never shows up in `lsusb` or in the desktop, and nothing is logged.
+
+**Why:** the T2's USB root hubs go to sleep aggressively, and a sleeping hub
+stops reporting new devices.
+
+**What the fix does:** a udev rule keeps the USB root hubs awake.
+
+## Speakers sound wrong (iMac20,x)
+
+**What you see:** in videos, voices sound muffled or seem to come from one
+set of speakers only; music sounds hollow.
+
+**Why:** the iMac's speakers appear to Linux as one 4-channel output, and
+t2linux-audio has no speaker tuning for these models, so stereo and 5.1 sound
+are spread over the channels the wrong way.
+
+**What the fix does:** adds an **iMac Speakers** stereo output that sends left
+and right to the right drivers. Choose it once as your output. See
+[Speaker output in detail](#speaker-output-in-detail).
 
 ---
 
@@ -129,9 +162,7 @@ up to date.
 
 > **Note:** The T2Linux patched kernel (providing the T2 bridge driver, `t2bce_core` or `apple_bce` on older kernels, and `applesmc`) must already be installed.
 
----
-
-## GRUB configuration (required)
+### GRUB configuration (required)
 
 `install.sh` reads your current `/etc/default/grub` and prints the exact lines to
 write, with your existing parameters preserved — follow that output rather than
@@ -418,7 +449,7 @@ daemon (`lactd`) is enabled, it sets this level too; use LACT instead.
 
 ---
 
-## Slow resume from suspend
+## Wake from sleep: the patch in detail
 
 On iMac20,2 every S3 resume used to stall for **10.1 s** before any device
 came back. It was the same on every kernel from 7.1.8 to 7.2.8 and on all 102
@@ -477,7 +508,7 @@ before suspending; each device then logs `calling …` / `… returned 0 after N
 
 ---
 
-## Speaker sound
+## Speaker output in detail
 
 On iMac20,x the T2 card's speaker output has 4 channels, labelled front-left,
 front-right, rear-left and rear-right. They are two sets of drivers in the
@@ -520,6 +551,74 @@ Then:
 Checked on iMac20,2 by recording the raw output's monitor while playing 440 Hz
 left and 880 Hz right: each left channel carried only 440 Hz and each right
 channel only 880 Hz, at equal levels.
+
+---
+
+## File overview
+
+### Installer
+
+| File | Description |
+| --- | --- |
+| `install.sh` | Main installer — runs all steps below |
+| `uninstall.sh` | Removes all installed files, disables services, then prints the GRUB and initramfs cleanup steps this system still needs. `--all` also removes `/boot/acpi_override.img`, `/etc/t2fand.conf`, `/etc/t2-pci-amdgpu.conf` and `/var/lib/t2-pci-amdgpu`, but keeps the image while GRUB still loads it: GRUB loads no initramfs at all when one of its files is missing, and the system would not boot. `--dry-run` previews everything. |
+| `t2-grub-common.bash` | GRUB helpers sourced by both scripts (not installed) |
+| `t2-tuned.bash` | tuned override helpers sourced by both scripts (not installed) |
+| `amdgpu-reset-pci-template` | Template for the PCI reset script; `ADDR` is replaced with the detected slot at install time |
+
+### Systemd units
+
+| File | Installed to | Description |
+| --- | --- | --- |
+| `amdgpu-warmfix.service` | `/etc/systemd/system/` | Runs the PCI reset at boot, before the display manager, if amdgpu's cold probe failed. Skips itself when `nomodeset` is set without an `amdgpu.modeset` override. |
+| `t2fanrd-dropin.conf` | `/etc/systemd/system/t2fanrd.service.d/10-t2-pci-amdgpu.conf` | When the t2linux `t2fanrd` package is installed (`/usr/bin/t2fanrd`): adds to the package's own unit the wait for the fan attribute, `RestartSec=5`, ordering after `applesmc-late`, and handing the fan back to the SMC on stop. The package's sandboxed unit and newer build are used as they are. |
+| `t2fanrd.service` | `/etc/systemd/system/` | Fallback without the package: runs the bundled T2 fan daemon |
+| `t2fanrd-resume.service` | `/etc/systemd/system/` | Restarts `t2fanrd` after resume — the SMC drops manual fan control across S3, so without this the fan runs loud until the daemon is restarted by hand |
+| `applesmc-late.service` | `/etc/systemd/system/` | Loads `applesmc` once the T2 bridge driver has bound (`t2bce_core`; `apple-bce` before the 7.1 t2 kernel) |
+
+None of these units order themselves after `systemd-udev-settle.service`. It is
+deprecated — systemd logs `systemd-udev-settle.service is deprecated. Please fix
+<unit> not to pull it in` and names the offenders — it cost 0.77 s of boot on
+iMac20,2, and draining the coldplug queue never actually guaranteed that the
+device a given unit needs is present. Each unit now waits on its own precondition:
+the T2 bridge binding, the `fan1_manual` attribute, or the GPU's PCI node.
+
+### Scripts and binaries
+
+| File | Installed to | Description |
+| --- | --- | --- |
+| `amdgpu-check.sh` | `/usr/local/bin/` | Health check: render node, module state, installed kernels with the broken `imac5k_table` quirk, PCI power state, warmfix log, GPU DPM level/clocks/temperatures/power, the Navi 10 feature mask in effect, HDMI/DP audio (including whether a tuned profile turned its power saving back on, and which file did), the fan daemon (binary, restarts, `fan1_manual`, RPM and the daemon's speed limit) and the tuned profile. Offers live warmfix re-trigger if GPU is missing (requires root). |
+| `t2-gpu-status.sh` | `/usr/local/bin/` | Quick GPU and service status snapshot |
+| `amdgpu-pci-reset-load.sh` | `/usr/local/bin/` (generated) | The warmfix itself, generated from `amdgpu-reset-pci-template` for the detected GPU slot; run by `amdgpu-warmfix.service` |
+| `t2-unit-state.sh` | `/usr/local/bin/` | Unit list and per-unit state (`ran-once`, `not-run`, …) shared by `amdgpu-check.sh` and `t2-gpu-status.sh` |
+| `t2-amd-nodes.sh` | `/usr/local/bin/` | Lists the DRM nodes under an AMD VGA function; shared by `amdgpu-check.sh` and `t2-gpu-status.sh` |
+| `t2-tuned-audio.sh` | `/usr/local/bin/` | Prints what a tuned profile (the active one by default) does to `snd_hda_intel power_save_controller`, and which profile file decides it. Uses tuned's own loader, so includes and unit priorities resolve as in tuned. Called by `amdgpu-check.sh` and `install.sh` |
+| `t2-gpu-dpm.sh` | `/usr/local/bin/` | Shows or sets the GPU's DPM level (`low`, `auto`, `high`). Setting it saves `T2_GPU_DPM` in `/etc/t2-pci-amdgpu.conf` for every boot and applies it at once. See [GPU performance level](#gpu-performance-level) |
+| `t2-wait-sysfs.sh` | `/usr/local/bin/` | Blocks until a sysfs path matching any given glob appears. Used as `ExecStartPre=` in place of `udevadm settle` — waits for the one device the unit needs instead of the whole coldplug queue |
+| `t2fanrd` | `/usr/local/bin/` | Fallback without the package: prebuilt T2 fan controller daemon — [GnomedDev/T2FanRD](https://github.com/GnomedDev/T2FanRD). With the package installed, the installer removes any copy here (backed up) |
+
+### Config files
+
+| File | Installed to | Description |
+| --- | --- | --- |
+| `amdgpu.conf` | `/etc/modprobe.d/` | Sets `amdgpu.aspm=0` and `amdgpu.runpm=0` at module level; blacklists `radeon`; sets `snd_hda_intel.power_save_controller=0` so the GPU's HDMI audio function stays out of runtime suspend |
+| `amdgpu-navi10-imac.conf` | `/etc/modprobe.d/` | Only on iMac20,x with a Navi 10 GPU (Radeon Pro 5700 / 5700 XT). Sets `amdgpu.ppfeaturemask=0xfff7bffd`, which keeps memory-clock scaling out of the power-management controller's start-up request. Without it, that controller hangs on most cold boots, and the GPU only came up after the warmfix's reset, ~6 s later and without HDMI/DP audio. With it, 9 of 9 cold boots came up first time. Cost: the memory clock cannot scale up under load. |
+| `99-amdgpu-t2.rules` | `/etc/udev/rules.d/` | Pins the AMD VGA function to `power/control=on` at device bind; sets the DPM level saved in `/etc/t2-pci-amdgpu.conf` (`low` when there is none); records amdgpu's successful bind (`AMDGPU_WARMFIX_BOUND=1`) so the warmfix can stop waiting for the probe. Also targets the HDMI audio function, but that write is best-effort — `snd_hda_intel` resets it to `auto` when it binds, which is why the module option above exists |
+| `99-t2-usb.rules` | `/etc/udev/rules.d/` | Pins USB root hubs (`idVendor=1d6b`, hub class `09`) to `power/control=on`. T2 xHCI hubs autosuspend aggressively and stop reporting device attach events; pinning the root hubs awake fixes USB-to-Ethernet adapters and similar devices not appearing in `lsusb`. |
+| `99-t2-wifi-off.rules` | `/etc/udev/rules.d/` | Only with `install.sh --disable-wifi`. Removes the Wi-Fi (ACPI `ARPT`) and its root port from the PCI tree at boot, so Apple's 1 s link waits on that port no longer run on every suspend and resume. Bluetooth is unaffected — it is on the UART. |
+| `t2-wifi-off.conf` | `/etc/modprobe.d/` | Only with `install.sh --disable-wifi`. Blacklists `brcmfmac`, which without Apple's firmware files only fails its probe and logs a `__flush_work` warning every boot. |
+| `t2-audio-wireplumber.conf.in` | `/etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf` (generated) | Only on T2 Macs whose speakers are one 4-channel output and that have no t2linux-audio speaker profile (iMac20,x). Adds a stereo "iMac Speakers" output in front of it and gives the card, mic and raw speaker output clearer names. See [Speaker output in detail](#speaker-output-in-detail). |
+| `t2-tuned-hda.conf.in` | `/etc/tuned/profiles/<name>/tuned.conf` (generated) | Only when tuned is installed and the GPU has an HDMI audio function: one per stock profile with an `[audio]` section (`balanced`, `powersave`). Includes the stock profile and stops tuned from turning `snd_hda_intel power_save_controller` back on, which would let the GPU's HDMI audio function runtime-suspend. A same-name profile you wrote, or a generated one whose settings you edited, is left alone, and the installer says whether it still keeps the audio function awake. |
+| `10-amdgpu-warmfix.conf` | `/etc/dracut.conf.d/` | Embeds `amdgpu`, `nvme` and `thunderbolt` in the initramfs via `force_drivers`. Every name must resolve to a real module — `force_drivers` makes a missing one a fatal `dracut -f` error |
+| `20-amdgpu-t2-cmdline.conf` | `/etc/dracut.conf.d/` | Embeds kernel params as initramfs fallback (used only when bootloader passes no cmdline) |
+
+### ACPI
+
+| File | Description |
+| --- | --- |
+| `GFXALT-multi.aml` | Compiled ACPI SSDT — packed into `/boot/acpi_override.img` by the installer |
+| `GFXALT-multi.dsl` | Source for the above. To recompile: `iasl -ve -tc GFXALT-multi.dsl` |
+| `t2-tbt-acpi-patch.py` | Run by the installer: reads Apple's `TbtOnPCH` SSDT from `/sys/firmware/acpi/tables`, patches two methods, and the result goes into the same image. No Apple code is shipped in this repo. |
 
 ---
 
