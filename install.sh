@@ -442,64 +442,42 @@ elif [[ ! -f /usr/share/wireplumber/scripts/node/software-dsp.lua ]]; then
 else
   t2_audio_pci="pci-${bdf//:/_}"
 fi
-if [[ -n "$t2_audio_pci" ]]; then
-  case "$mac_model" in
-    iMacPro*)     mac_name="iMac Pro" ;;
-    iMac*)        mac_name="iMac" ;;
-    MacBookPro*)  mac_name="MacBook Pro" ;;
-    MacBookAir*)  mac_name="MacBook Air" ;;
-    Macmini*)     mac_name="Mac mini" ;;
-    *)            mac_name="Mac" ;;
-  esac
-  say "T2 speakers (${mac_model}, ${bdf}): stereo \"${mac_name} Speakers\" sink"
+mac_name="Mac"
+case "$mac_model" in
+  iMacPro*)     mac_name="iMac Pro" ;;
+  iMac*)        mac_name="iMac" ;;
+  MacBookPro*)  mac_name="MacBook Pro" ;;
+  MacBookAir*)  mac_name="MacBook Air" ;;
+  Macmini*)     mac_name="Mac mini" ;;
+esac
+# wp_conf TEMPLATE DEST NAME DESC — generate DEST from TEMPLATE for this card and
+# install it, or retire DEST when there is no card to fit (t2_audio_pci empty).
+# Sets t2_wp_changed when DEST changes, for the "restart wireplumber" hint.
+wp_conf() {
+  local gen
+  if [[ -z "$t2_audio_pci" ]]; then
+    say "T2 ${3}: ${4} not needed — ${t2_speakers_why}"
+    [[ -e "$2" ]] && t2_wp_changed=1
+    retire_file "$2" "$t2_speakers_why"
+    return 0
+  fi
+  say "T2 ${3} (${mac_model}, ${bdf}): ${4}"
   gen="$(mktemp)"
   sed -e "s/@T2_AUDIO_PCI@/${t2_audio_pci}/g" -e "s/@MODEL@/${mac_name}/g" \
-    "${SRC_DIR}/t2-audio-wireplumber.conf.in" > "$gen"
-  cmp -s -- "$gen" "$T2_SPEAKERS_CONF" || t2_wp_changed=1
-  install_file "$gen" "$T2_SPEAKERS_CONF"
+    "${SRC_DIR}/$1" > "$gen"
+  cmp -s -- "$gen" "$2" || t2_wp_changed=1
+  install_file "$gen" "$2"
   rm -f -- "$gen"
-else
-  say "T2 speakers: stereo sink not needed — ${t2_speakers_why}"
-  [[ -e "$T2_SPEAKERS_CONF" ]] && t2_wp_changed=1
-  retire_file "$T2_SPEAKERS_CONF" "$t2_speakers_why"
-fi
-# Microphone: same Macs as the speaker sink (no t2linux-audio profile, so no
-# mic.json either).  The raw T2 mic has no gain control and arrives ~40 dB
-# low; a mono source in front of it adds the gain.  See t2-mic-wireplumber.conf.in.
-T2_MIC_CONF=/etc/wireplumber/wireplumber.conf.d/51-t2-mic.conf
-t2_mic_why="$t2_speakers_why"
-# lv2_found GLOB — true if GLOB matches under one of the default LV2 or SPA dirs.
-lv2_found() {
-  local d
-  for d in /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib; do
-    compgen -G "${d}/$1" >/dev/null && return 0
-  done
-  return 1
 }
-if [[ -n "$t2_audio_pci" ]]; then
-  if ! lv2_found "lv2/fast_lookahead_limiter-swh.lv2/manifest.ttl"; then
-    t2_mic_why="LV2 limiter missing (install lv2-swh-plugins)"
-  elif ! lv2_found "spa-0.2/filter-graph/libspa-filter-graph-plugin-lv2.so"; then
-    t2_mic_why="PipeWire LV2 filter support missing (install pipewire-module-filter-chain-lv2)"
-  fi
-fi
-if [[ -n "$t2_audio_pci" && -z "$t2_mic_why" ]]; then
-  say "T2 microphone (${mac_model}, ${bdf}): +40 dB mono \"${mac_name} Microphone\" source"
-  gen="$(mktemp)"
-  sed -e "s/@T2_AUDIO_PCI@/${t2_audio_pci}/g" -e "s/@MODEL@/${mac_name}/g" \
-    "${SRC_DIR}/t2-mic-wireplumber.conf.in" > "$gen"
-  cmp -s -- "$gen" "$T2_MIC_CONF" || t2_wp_changed=1
-  install_file "$gen" "$T2_MIC_CONF"
-  rm -f -- "$gen"
-else
-  if [[ -n "$t2_audio_pci" ]]; then
-    warn "T2 microphone: gain filter not installed — ${t2_mic_why}"
-  else
-    say "T2 microphone: gain filter not needed — ${t2_mic_why}"
-  fi
-  [[ -e "$T2_MIC_CONF" ]] && t2_wp_changed=1
-  retire_file "$T2_MIC_CONF" "$t2_mic_why"
-fi
+wp_conf t2-audio-wireplumber.conf.in "$T2_SPEAKERS_CONF" \
+  speakers "stereo \"${mac_name} Speakers\" sink"
+# Microphone: same Macs (no t2linux-audio profile, so no mic.json either).
+# The raw T2 mic has no gain control and arrives ~40 dB low; a mono source
+# in front of it adds the gain.  See t2-mic-wireplumber.conf.in.  Its limiter
+# comes from lv2-swh-plugins, which t2linux-audio (the UCM that names the raw
+# source) depends on, as on pipewire-module-filter-chain-lv2.
+wp_conf t2-mic-wireplumber.conf.in /etc/wireplumber/wireplumber.conf.d/51-t2-mic.conf \
+  microphone "+40 dB mono \"${mac_name} Microphone\" source"
 # tuned: shadow each stock profile with an [audio] unit, so it stops turning
 # HDMI audio power saving back on.  See t2-tuned-hda.conf.in.  Our own files
 # are not backed up: a backup would only hold an older generated copy.  One

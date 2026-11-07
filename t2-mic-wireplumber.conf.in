@@ -42,24 +42,22 @@ node.software-dsp.rules = [
                     media.name       = "@MODEL@ Microphone"
                     filter.graph = {
                         nodes = [
-                            # Builtin gains are capped at 10 (+20 dB) each,
-                            # so the gain takes two stages:
-                            # (AUX0 + AUX1) * 5 * 10 = their mean * 100.
+                            # Builtin gains are capped at 10 (+20 dB), so the
+                            # gain takes two stages: (AUX0 + AUX1) * 5 = their
+                            # mean +20 dB here, +20 dB more in the limiter.
                             { type = builtin label = mixer name = mix
                               control = { "Gain 1" = 5.0 "Gain 2" = 5.0 } }
-                            { type = builtin label = linear name = gain
-                              control = { "Mult" = 10.0 "Add" = 0.0 } }
                             { type = builtin label = bq_highpass name = hp
                               control = { "Freq" = 90.0 "Q" = 0.707 } }
                             # lv2-swh-plugins, a t2linux-audio dependency.
+                            # ingain is its input gain (max +20 dB).
                             { type = lv2 name = lim
                               plugin = "http://plugin.org.uk/swh-plugins/fastLookaheadLimiter"
-                              control = { "ingain" = 0.0 "limit" = -1.0 "release" = 0.25 } }
+                              control = { "ingain" = 20.0 "limit" = -1.0 "release" = 0.25 } }
                         ]
                         links = [
-                            { output = "mix:Out"  input = "gain:In" }
-                            { output = "gain:Out" input = "hp:In" }
-                            { output = "hp:Out"   input = "lim:in_1" }
+                            { output = "mix:Out" input = "hp:In" }
+                            { output = "hp:Out"  input = "lim:in_1" }
                         ]
                         inputs  = [ "mix:In 1" "mix:In 2" ]
                         outputs = [ "lim:out_1" ]

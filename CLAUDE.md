@@ -257,10 +257,11 @@ The T2 exposes the mic raw: `amixer -c Audio` has no capture control (only
 T2 Mac, not this unit: t2linux-audio's MacBook `mic.json` graphs all add gain
 after their beamformer (mixer ×80, or 35 dB amp + 5 dB makeup), and there is
 none for `20_2`. `install.sh` generates `/etc/wireplumber/wireplumber.conf.d/51-t2-mic.conf`
-from `t2-mic-wireplumber.conf.in`, on the same gate as the speaker filter, plus
-two LV2 checks (the swh `fast_lookahead_limiter` bundle and SPA's
-`libspa-filter-graph-plugin-lv2.so`): it warns and retires the file when one
-is missing.
+from `t2-mic-wireplumber.conf.in`, on the same gate as the speaker filter
+(one `wp_conf` helper generates, installs or retires both). Its limiter is LV2
+(`lv2-swh-plugins`, plus `pipewire-module-filter-chain-lv2`); there is no
+check, because both are dependencies of t2linux-audio, whose UCM gives the raw
+source the `HiFi__Mic__source` name the rule matches.
 
 The graph, measured 2026-11-07 on iMac20,2:
 - Raw channels: AUX0 and AUX1 correlate 0.93 in 200–4000 Hz, and AUX1 has a
@@ -271,8 +272,9 @@ The graph, measured 2026-11-07 on iMac20,2:
   `--channel-map=aux0,aux1,aux2` remixes to FL/FR/FC and returns AUX2 as 100 %
   zeros. Handy's session concluded "AUX2 is dead" from exactly that.
 - Builtin `mixer` gains and `linear`'s `Mult` are clamped to 10. `Mult = 100`
-  silently gave +20.0 dB, so the gain is two stages (mixer 5+5, then linear ×10),
-  measured at +40.0 dB against the raw source.
+  silently gave +20.0 dB, so the gain is two stages: mixer 5+5 (+20 dB on the
+  mean), then the limiter's `ingain = 20`. Measured at +40.0 dB against the raw
+  source (+40.1 dB after the `linear` stage was folded into `ingain`).
 - The limiter (`limit −1`, `release 0.25`) was checked by setting `limit −20` with
   `ingain +20`: peaks stopped at −20.00 dBFS.
 - The same +40 dB in Handy's user-level filter gave dictation peaks near
