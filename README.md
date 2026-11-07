@@ -3,7 +3,8 @@
 An Intel Mac with Apple's T2 chip runs Linux with the t2linux kernel, but some
 things still go wrong: the graphics card may not start, the fan can roar or
 stay loud after sleep, waking from sleep is slow, plugged-in USB devices can
-go unnoticed, and the iMac's speakers sound odd. This repo fixes those with
+go unnoticed, the iMac's speakers sound odd and its microphone is too quiet.
+This repo fixes those with
 one installer, and installs each model-specific part only on hardware that
 needs it.
 
@@ -20,6 +21,7 @@ must already be installed.
 | Waking from sleep takes about 10 s | Cuts about 9 s of it, and the rest with Wi-Fi turned off | [Slow wake from sleep](#slow-wake-from-sleep) |
 | A USB device you plug in does not show up | Keeps the USB hubs awake | [USB devices not appearing](#usb-devices-not-appearing) |
 | iMac speakers: voices muffled or from one side, music hollow | Adds a proper stereo speaker output | [Speakers sound wrong](#speakers-sound-wrong-imac20x) |
+| iMac microphone: others barely hear you, dictation drops words | Adds an amplified microphone input | [Microphone too quiet](#microphone-too-quiet-imac20x) |
 
 ---
 
@@ -127,6 +129,25 @@ and right to the right drivers. Choose it once as your output. See
 
 ---
 
+## Microphone too quiet (iMac20,x)
+
+**What you see:** in calls people barely hear you; dictation or speech
+recognition misses words or whole sentences, because it takes your voice for
+silence.
+
+**Why:** the T2 chip passes the microphones to Linux raw, with no gain control.
+macOS amplifies them in its own audio processing, and t2linux-audio does the
+same for each MacBook, but it has no microphone profile for the iMac. Your
+voice arrives about 40 dB too low. This is the same on every T2 Mac of this
+kind, not a faulty microphone: on iMac20,2 all three microphone capsules work.
+
+**What the fix does:** adds an **iMac Microphone** input that amplifies the
+built-in microphone by 40 dB, with a limiter so loud sounds do not distort.
+Choose it once as your input. See
+[Microphone input in detail](#microphone-input-in-detail).
+
+---
+
 ## Install
 
 ```bash
@@ -146,8 +167,8 @@ The installer will:
 3. Auto-detect the AMD GPU PCI slot and generate `/usr/local/bin/amdgpu-pci-reset-load.sh`
 4. Install scripts to `/usr/local/bin/`, plus the bundled `t2fanrd` binary when the t2linux `t2fanrd` package is not installed
 5. Install `modprobe.d`, `udev`, and `dracut` config files, and only where they
-   apply: the Navi 10 feature mask, the stereo speaker filter and the tuned
-   overrides
+   apply: the Navi 10 feature mask, the stereo speaker and microphone filters
+   and the tuned overrides
 6. Create `/etc/t2fand.conf`, or reconcile an existing one (see below), and
    restart a running `t2fanrd` so the change takes effect
 7. Enable `amdgpu-warmfix`, `t2fanrd`, `t2fanrd-resume`, and `applesmc-late` services
@@ -531,7 +552,6 @@ left to both left channels and right to both right channels. It also renames:
 | --- | --- |
 | Sound card | iMac Built-in Audio |
 | 4-channel speaker output | Raw Speakers (do not use) |
-| Built-in microphone | iMac Microphone |
 | Headset microphone (jack) | Headset Microphone (jack) |
 
 GNOME Settings labels devices "port – card", so it shows the new card name, for
@@ -551,6 +571,48 @@ Then:
 Checked on iMac20,2 by recording the raw output's monitor while playing 440 Hz
 left and 880 Hz right: each left channel carried only 440 Hz and each right
 channel only 880 Hz, at equal levels.
+
+---
+
+## Microphone input in detail
+
+The built-in microphone appears as one 3-channel source, one channel per
+capsule, with no capture gain control: speech arrives around −50 dBFS. On
+iMac20,2:
+
+- **AUX0 and AUX1** carry nearly the same sound (correlation 0.93): two
+  capsules close together. AUX1 also has a constant DC offset.
+- **AUX2** works, but picks up a different signal (correlation about −0.2),
+  likely a capsule farther away. Mixed in without a beamformer it would blur
+  the voice, so the filter leaves it out.
+
+The installer adds a WirePlumber filter
+(`/etc/wireplumber/wireplumber.conf.d/51-t2-mic.conf`). It creates a mono
+**iMac Microphone** input: the mean of AUX0 and AUX1, amplified by 40 dB,
+with a 90 Hz high-pass that removes the DC offset and room rumble, and a
+limiter at −1 dBFS. The raw source is renamed **Raw Microphone (do not use)**.
+The limiter needs `lv2-swh-plugins` and `pipewire-module-filter-chain-lv2`,
+both t2linux-audio dependencies. When one is missing, the installer warns and
+installs no filter.
+
+It takes effect at the next login, or after `systemctl --user restart wireplumber`.
+Then:
+
+- Choose **iMac Microphone** as the input once if it is not already the
+  default: WirePlumber remembers earlier choices.
+- Leave **Raw Microphone** at 100%; the gain is all in the filter.
+- A microphone filter set up elsewhere for the same purpose (Handy's
+  `imac-t2` filter, for example) is no longer needed: turn it off, so only one
+  amplified input is left to choose from.
+
+Checked on iMac20,2: the gain measured exactly +40.0 dB against the raw
+source, and with the limit set to −20 dB for the test, peaks stopped at
+−20.00 dBFS. With the same gain, dictated speech peaked near −5 dBFS, about
+22 dB above the room noise, and a long test dictation came out complete.
+
+To record the raw channels yourself, give the channel map:
+`pw-record --target alsa_input.pci-0000_04_00.3.HiFi__Mic__source --channels 3 --channel-map AUX0,AUX1,AUX2 raw.wav`.
+Without it, `parecord` remixes the channels and AUX2 comes back as all zeros.
 
 ---
 
@@ -607,7 +669,8 @@ the T2 bridge binding, the `fan1_manual` attribute, or the GPU's PCI node.
 | `99-t2-usb.rules` | `/etc/udev/rules.d/` | Pins USB root hubs (`idVendor=1d6b`, hub class `09`) to `power/control=on`. T2 xHCI hubs autosuspend aggressively and stop reporting device attach events; pinning the root hubs awake fixes USB-to-Ethernet adapters and similar devices not appearing in `lsusb`. |
 | `99-t2-wifi-off.rules` | `/etc/udev/rules.d/` | Only with `install.sh --disable-wifi`. Removes the Wi-Fi (ACPI `ARPT`) and its root port from the PCI tree at boot, so Apple's 1 s link waits on that port no longer run on every suspend and resume. Bluetooth is unaffected — it is on the UART. |
 | `t2-wifi-off.conf` | `/etc/modprobe.d/` | Only with `install.sh --disable-wifi`. Blacklists `brcmfmac`, which without Apple's firmware files only fails its probe and logs a `__flush_work` warning every boot. |
-| `t2-audio-wireplumber.conf.in` | `/etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf` (generated) | Only on T2 Macs whose speakers are one 4-channel output and that have no t2linux-audio speaker profile (iMac20,x). Adds a stereo "iMac Speakers" output in front of it and gives the card, mic and raw speaker output clearer names. See [Speaker output in detail](#speaker-output-in-detail). |
+| `t2-audio-wireplumber.conf.in` | `/etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf` (generated) | Only on T2 Macs whose speakers are one 4-channel output and that have no t2linux-audio speaker profile (iMac20,x). Adds a stereo "iMac Speakers" output in front of it and gives the card, raw speaker output and headset mic clearer names. See [Speaker output in detail](#speaker-output-in-detail). |
+| `t2-mic-wireplumber.conf.in` | `/etc/wireplumber/wireplumber.conf.d/51-t2-mic.conf` (generated) | Same Macs as the speaker filter. Adds an "iMac Microphone" input that amplifies the raw T2 microphone by 40 dB, with a high-pass and a limiter. See [Microphone input in detail](#microphone-input-in-detail). |
 | `t2-tuned-hda.conf.in` | `/etc/tuned/profiles/<name>/tuned.conf` (generated) | Only when tuned is installed and the GPU has an HDMI audio function: one per stock profile with an `[audio]` section (`balanced`, `powersave`). Includes the stock profile and stops tuned from turning `snd_hda_intel power_save_controller` back on, which would let the GPU's HDMI audio function runtime-suspend. A same-name profile you wrote, or a generated one whose settings you edited, is left alone, and the installer says whether it still keeps the audio function awake. |
 | `10-amdgpu-warmfix.conf` | `/etc/dracut.conf.d/` | Embeds `amdgpu`, `nvme` and `thunderbolt` in the initramfs via `force_drivers`. Every name must resolve to a real module — `force_drivers` makes a missing one a fatal `dracut -f` error |
 | `20-amdgpu-t2-cmdline.conf` | `/etc/dracut.conf.d/` | Embeds kernel params as initramfs fallback (used only when bootloader passes no cmdline) |

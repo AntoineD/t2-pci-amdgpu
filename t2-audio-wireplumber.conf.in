@@ -87,13 +87,7 @@ monitor.alsa.rules = [
             node.nick        = "Raw Speakers"
         } }
     }
-    {
-        matches = [ { node.name = "alsa_input.@T2_AUDIO_PCI@.HiFi__Mic__source" } ]
-        actions = { update-props = {
-            node.description = "@MODEL@ Microphone"
-            node.nick        = "@MODEL@ Microphone"
-        } }
-    }
+    # The built-in microphone is renamed in 51-t2-mic.conf, with its filter.
     {
         matches = [ { node.name = "alsa_input.@T2_AUDIO_PCI@.HiFi__Headset__source" } ]
         actions = { update-props = {

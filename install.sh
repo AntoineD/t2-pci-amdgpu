@@ -11,6 +11,8 @@
 #   - Display manager drop-in        → warmfix runs before DM at boot
 #   - iMac20,x speakers: stereo sink → /etc/wireplumber/wireplumber.conf.d/
 #                                      (generated from t2-audio-wireplumber.conf.in)
+#   - iMac20,x microphone: gain      → /etc/wireplumber/wireplumber.conf.d/
+#                                      (generated from t2-mic-wireplumber.conf.in)
 #   - tuned profiles with [audio]    → /etc/tuned/profiles/<name>/tuned.conf
 #                                      (generated from t2-tuned-hda.conf.in)
 #
@@ -417,7 +419,7 @@ fi
 T2_SPEAKERS_CONF=/etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf
 t2_speakers_why=""
 t2_audio_pci=""
-t2_speakers_changed=0
+t2_wp_changed=0
 # t2_audio_card — print the PCI address (0000:04:00.3) of the AppleT2x4 card.
 t2_audio_card() {
   local n
@@ -453,13 +455,50 @@ if [[ -n "$t2_audio_pci" ]]; then
   gen="$(mktemp)"
   sed -e "s/@T2_AUDIO_PCI@/${t2_audio_pci}/g" -e "s/@MODEL@/${mac_name}/g" \
     "${SRC_DIR}/t2-audio-wireplumber.conf.in" > "$gen"
-  cmp -s -- "$gen" "$T2_SPEAKERS_CONF" || t2_speakers_changed=1
+  cmp -s -- "$gen" "$T2_SPEAKERS_CONF" || t2_wp_changed=1
   install_file "$gen" "$T2_SPEAKERS_CONF"
   rm -f -- "$gen"
 else
   say "T2 speakers: stereo sink not needed — ${t2_speakers_why}"
-  [[ -e "$T2_SPEAKERS_CONF" ]] && t2_speakers_changed=1
+  [[ -e "$T2_SPEAKERS_CONF" ]] && t2_wp_changed=1
   retire_file "$T2_SPEAKERS_CONF" "$t2_speakers_why"
+fi
+# Microphone: same Macs as the speaker sink (no t2linux-audio profile, so no
+# mic.json either).  The raw T2 mic has no gain control and arrives ~40 dB
+# low; a mono source in front of it adds the gain.  See t2-mic-wireplumber.conf.in.
+T2_MIC_CONF=/etc/wireplumber/wireplumber.conf.d/51-t2-mic.conf
+t2_mic_why="$t2_speakers_why"
+# lv2_found GLOB — true if GLOB matches under one of the default LV2 or SPA dirs.
+lv2_found() {
+  local d
+  for d in /usr/lib64 /usr/lib /usr/local/lib64 /usr/local/lib; do
+    compgen -G "${d}/$1" >/dev/null && return 0
+  done
+  return 1
+}
+if [[ -n "$t2_audio_pci" ]]; then
+  if ! lv2_found "lv2/fast_lookahead_limiter-swh.lv2/manifest.ttl"; then
+    t2_mic_why="LV2 limiter missing (install lv2-swh-plugins)"
+  elif ! lv2_found "spa-0.2/filter-graph/libspa-filter-graph-plugin-lv2.so"; then
+    t2_mic_why="PipeWire LV2 filter support missing (install pipewire-module-filter-chain-lv2)"
+  fi
+fi
+if [[ -n "$t2_audio_pci" && -z "$t2_mic_why" ]]; then
+  say "T2 microphone (${mac_model}, ${bdf}): +40 dB mono \"${mac_name} Microphone\" source"
+  gen="$(mktemp)"
+  sed -e "s/@T2_AUDIO_PCI@/${t2_audio_pci}/g" -e "s/@MODEL@/${mac_name}/g" \
+    "${SRC_DIR}/t2-mic-wireplumber.conf.in" > "$gen"
+  cmp -s -- "$gen" "$T2_MIC_CONF" || t2_wp_changed=1
+  install_file "$gen" "$T2_MIC_CONF"
+  rm -f -- "$gen"
+else
+  if [[ -n "$t2_audio_pci" ]]; then
+    warn "T2 microphone: gain filter not installed — ${t2_mic_why}"
+  else
+    say "T2 microphone: gain filter not needed — ${t2_mic_why}"
+  fi
+  [[ -e "$T2_MIC_CONF" ]] && t2_wp_changed=1
+  retire_file "$T2_MIC_CONF" "$t2_mic_why"
 fi
 # tuned: shadow each stock profile with an [audio] unit, so it stops turning
 # HDMI audio power saving back on.  See t2-tuned-hda.conf.in.  Our own files
@@ -680,8 +719,8 @@ rm -f -- "$gen"
 # ---------------------------------------------------------------------------
 say "✅ Installation complete."
 # WirePlumber reads its config when the user's session starts, not at boot.
-if (( t2_speakers_changed && ! DRY_RUN )); then
-  say "Speakers: log out and back in, or run as your user:"
+if (( t2_wp_changed && ! DRY_RUN )); then
+  say "Speakers and microphone: log out and back in, or run as your user:"
   say "  systemctl --user restart wireplumber"
 fi
 

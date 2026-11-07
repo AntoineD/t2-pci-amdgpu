@@ -250,6 +250,42 @@ R=880 Hz. Muting the raw sink keeps the speakers silent, and the monitor still
 carries the signal. Without the channel map the capture is remixed: the result
 (FL=L, FR=0, RL=R, RR=L+R) looked like a broken graph when the graph was fine.
 
+## Built-in microphone — +40 dB mono source over the raw T2 mic
+
+The T2 exposes the mic raw: `amixer -c Audio` has no capture control (only
+`Codec Output Jack`), and speech arrives near −50 dBFS. This holds for every
+T2 Mac, not this unit: t2linux-audio's MacBook `mic.json` graphs all add gain
+after their beamformer (mixer ×80, or 35 dB amp + 5 dB makeup), and there is
+none for `20_2`. `install.sh` generates `/etc/wireplumber/wireplumber.conf.d/51-t2-mic.conf`
+from `t2-mic-wireplumber.conf.in`, on the same gate as the speaker filter, plus
+two LV2 checks (the swh `fast_lookahead_limiter` bundle and SPA's
+`libspa-filter-graph-plugin-lv2.so`): it warns and retires the file when one
+is missing.
+
+The graph, measured 2026-11-07 on iMac20,2:
+- Raw channels: AUX0 and AUX1 correlate 0.93 in 200–4000 Hz, and AUX1 has a
+  constant DC offset (~7e-3, −43 dBFS). AUX2 is a live capsule, uncorrelated
+  with them (−0.2): it rose +14 dB with the others on a room transient. It is
+  left out, since summing it without a beamformer would comb-filter.
+- **Always capture with an AUX channel map.** `parecord --channels=3` without
+  `--channel-map=aux0,aux1,aux2` remixes to FL/FR/FC and returns AUX2 as 100 %
+  zeros. Handy's session concluded "AUX2 is dead" from exactly that.
+- Builtin `mixer` gains and `linear`'s `Mult` are clamped to 10. `Mult = 100`
+  silently gave +20.0 dB, so the gain is two stages (mixer 5+5, then linear ×10),
+  measured at +40.0 dB against the raw source.
+- The limiter (`limit −1`, `release 0.25`) was checked by setting `limit −20` with
+  `ingain +20`: peaks stopped at −20.00 dBFS.
+- The same +40 dB in Handy's user-level filter gave dictation peaks near
+  −5 dBFS and 22 dB above room noise. Handy's own `imac-t2` filter
+  (`~/.config/pipewire/pipewire.conf.d/handy-mic-filter.conf`) duplicates this one;
+  with both active there are two amplified sources, not double gain, but only
+  one should stay.
+
+The raw source keeps 100 % volume and stays visible (`hide-parent = false`),
+as for the speakers. The filter's source has `priority.session = 2000` against
+the raw source's 1728, but WirePlumber's saved default wins, so the user picks
+"iMac Microphone" once.
+
 ## Unit ordering — no udev-settle
 
 No unit may order itself after `systemd-udev-settle.service`. It is deprecated,
@@ -282,7 +318,7 @@ unit's `modprobe` is normally a no-op. It is kept as insurance, not as the path.
 - `t2-tuned-hda.conf.in` → `/etc/tuned/profiles/<name>/tuned.conf` for each stock tuned profile with an `[audio]` section (see layer 3). Applied live through tuned's D-Bus `reload` (`busctl call com.redhat.tuned /Tuned com.redhat.tuned.control reload`), not `tuned-adm profile <same>`, which would switch the selection mode to manual. A reload rolls back and re-applies the whole profile. Installed only when the GPU slot has a `.1` audio function; otherwise pristine copies are removed. A marked file counts as ours only while its settings (sections and keys, minus comments, blank lines and `summary=`) match the template's (`tuned_is_pristine`); an edited one is kept and judged like a user's file, by both scripts. Ours are replaced without a backup, and `uninstall.sh` removes pristine files and backups only. A change to the template's settings makes older generated files look edited, so it needs a migration.
 - `t2-tuned.bash` (sourced by both scripts, not installed) holds the tuned facts: the marker, which is the template's first line and has no other copy; `tuned_is_ours`; `tuned_has_audio`; and `tuned_reload`, the D-Bus reload, which never fails because the callers run under `set -e`. `install.sh` reloads when it changed an override or when the live `power_save_controller` reads `Y`, then reads it again; `uninstall.sh` reloads after removing an override.
 - `t2-tuned-audio.sh [PROFILE...]` prints `on|off|bad|none FILE`: what tuned does to `power_save_controller` under the profile (the active one by default), and the file that decides it. It runs tuned's public `Loader.load()`, with the `Locator`, `Factory` and `Merger` subclassed to record which file each profile came from and which file last set or dropped `reset_controller` per unit. Then it replays the audio plugin's device assignment. Each enabled `type=audio` unit is its own instance. Instances are sorted by priority (stable, file order breaks ties) and filtered by `cpuinfo_regex`/`uname_regex`. `snd_hda_intel` goes to the first one whose `devices=` match; `devices_udev_regex` matches nothing. So a second audio unit at the same priority gets no device, and one with a lower `priority=` takes it over. Values go through tuned's `get_bool`, then kstrtobool (`off` is false; a value neither accepts is `bad` and the write fails). Tested 2026-10-18 against scratch profiles for each case. A bash copy of tuned's resolver was tried first and dropped: it could not follow `${variables}` or audio units under other names, and it drifts with each tuned release.
-- `t2-audio-wireplumber.conf.in` → `/etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf` (generated; see Speaker audio). WirePlumber reads it at session start, so it is not in the reboot list. `install.sh` prints a `systemctl --user restart wireplumber` hint instead when the file changed.
+- `t2-audio-wireplumber.conf.in` → `/etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf` (generated; see Speaker audio). `t2-mic-wireplumber.conf.in` → `51-t2-mic.conf` beside it (see Built-in microphone); it renames the raw mic, so the speaker file no longer does. WirePlumber reads it at session start, so it is not in the reboot list. `install.sh` prints a `systemctl --user restart wireplumber` hint instead when the file changed.
 - `t2-amd-nodes.sh` is the one copy of "DRM nodes under an AMD VGA function", called the same way by both scripts. The warmfix template keeps its own per-slot `gpu_render_node`: the generated script must stand alone.
 - `install.sh` ends with an "Action required" block listing only outstanding steps: `/etc/default/grub` edits, `grub2-mkconfig` when grubenv lacks `early_initrd=…acpi_override.img` (BLS) or `grub.cfg` lacks it, `grubby` when a BLS entry (`grubby --info=ALL`) lacks a required param, `dracut` for each `/boot/initramfs-<kver>.img` older than the newest dracut/modprobe input, and a reboot when a boot-time file's mtime is after `btime` or `/proc/cmdline`/the journal show the fix inactive. A finished install prints "No action required". A `--dry-run` counts every file it would install as changed now, so the preview lists the dracut and reboot steps the real run will need. Without root it skips the GRUB checks (grubenv, `/boot/loader/entries` and `grubby --info` are root-only) and says so instead of listing them. A deleted input (the `--disable-wifi` files) moves no mtime, so as root it is looked for inside each image with `lsinitrd -f`. The ACPI tables count as loaded only from their `ACPI: SSDT 0x…` header (GFXALT) or `Table Upgrade: override [SSDT-APPLE -TbtOnPCH]`, judged only when the boot's journal still starts at `Linux version`; the `table found in initrd` line names the file even when the load fails. This relies on `install_file` leaving identical files untouched: anything that rewrites unchanged files bumps mtimes and brings back spurious dracut/reboot steps.
 - `install.sh` `try-restart`s `t2fanrd` at the end — the daemon reads its config and unit only at start, so a rewritten band otherwise changes nothing until reboot. Its "up to date" verdict compares `speed_curve` and `always_full_speed` too, not only the band.

@@ -177,9 +177,15 @@ offer_restore "/etc/modprobe.d/amdgpu-navi10-imac.conf"
 offer_restore "/etc/udev/rules.d/99-amdgpu-t2.rules"
 offer_restore "/etc/udev/rules.d/99-t2-usb.rules"
 offer_restore "/etc/udev/rules.d/99-t2-wifi-off.rules"
-if [[ -e /etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf ]]; then
-  offer_restore "/etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf"
-  say "Speakers: log out and back in, or run 'systemctl --user restart wireplumber' as your user"
+wp_removed=0
+for f in /etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf \
+         /etc/wireplumber/wireplumber.conf.d/51-t2-mic.conf; do
+  [[ -e "$f" ]] || continue
+  offer_restore "$f"
+  wp_removed=1
+done
+if (( wp_removed )); then
+  say "Speakers and microphone: log out and back in, or run 'systemctl --user restart wireplumber' as your user"
 fi
 # tuned overrides from t2-tuned-hda.conf.in.  Only files carrying our marker
 # go, so a profile the user wrote under the same name stays; and only while
