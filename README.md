@@ -157,6 +157,22 @@ Choose it once as your input. See
 
 ---
 
+## Lines around the pointer (iMac20,x)
+
+**What you see:** with GNOME on a t2 kernel from 7.2.9 on, thin flickering
+lines around the mouse pointer and around what you click, in one half of the
+screen.
+
+**Why:** these kernels drive the 5K panel as two 2560×2880 halves, and the
+graphics card's hardware pointer draws those lines there. Older kernels show
+one 3840×2160 screen at most and are not affected.
+
+**What the fix does:** makes GNOME draw the pointer itself
+(`/etc/environment.d/90-t2-sw-cursor.conf`). It takes effect at your next
+login.
+
+---
+
 ## Install
 
 ```bash
@@ -176,8 +192,8 @@ The installer will:
 3. Auto-detect the AMD GPU PCI slot and generate `/usr/local/bin/amdgpu-pci-reset-load.sh`
 4. Install scripts to `/usr/local/bin/`, plus the bundled `t2fanrd` binary when the t2linux `t2fanrd` package is not installed
 5. Install `modprobe.d`, `udev`, and `dracut` config files, and only where they
-   apply: the Navi 10 feature mask, the stereo speaker and microphone filters
-   and the tuned overrides
+   apply: the Navi 10 feature mask, the stereo speaker and microphone filters,
+   the iMac20,x software cursor and the tuned overrides
 6. Create `/etc/t2fand.conf`, or reconcile an existing one (see below), and
    restart a running `t2fanrd` so the change takes effect
 7. Enable `amdgpu-warmfix`, `t2fanrd`, `t2fanrd-resume`, and `applesmc-late` services

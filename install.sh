@@ -13,6 +13,7 @@
 #                                      (generated from t2-audio-wireplumber.conf.in)
 #   - iMac20,x microphone: gain      → /etc/wireplumber/wireplumber.conf.d/
 #                                      (generated from t2-mic-wireplumber.conf.in)
+#   - iMac20,x: software cursor      → /etc/environment.d/90-t2-sw-cursor.conf
 #   - tuned profiles with [audio]    → /etc/tuned/profiles/<name>/tuned.conf
 #                                      (generated from t2-tuned-hda.conf.in)
 #
@@ -65,6 +66,9 @@ backup() {
 # check treats them as changed now, so the preview lists the dracut and reboot
 # steps the real install will need.
 declare -A pending=()
+# Files install_file/retire_file changed (or would change, under --dry-run),
+# for the "log out" / "restart wireplumber" hints.
+declare -A changed=()
 
 # install_file SRC DST [MODE]  — backup DST if present, then install SRC → DST
 #
@@ -84,17 +88,19 @@ install_file() {
   fi
   if (( DRY_RUN )); then
     say "Would install: $src → $dst (mode $mode)"
-    pending[$dst]=1
+    pending[$dst]=1 changed[$dst]=1
     return 0
   fi
   backup "$dst"
   install -Dm"$mode" "$src" "$dst"
+  changed[$dst]=1
   say "Installed: $dst"
 }
 
 # retire_file PATH WHY — back PATH up, then remove it
 retire_file() {
   [[ -e "$1" ]] || return 0
+  changed[$1]=1
   if (( DRY_RUN )); then say "Would retire: $1 ($2)"; pending[$1]=1; return 0; fi
   backup "$1"
   rm -f -- "$1"
@@ -462,17 +468,17 @@ wp_conf() {
   local gen
   if [[ -z "$t2_audio_pci" ]]; then
     say "T2 ${3}: ${4} not needed — ${t2_speakers_why}"
-    [[ -e "$2" ]] && t2_wp_changed=1
     retire_file "$2" "$t2_speakers_why"
+    [[ -z "${changed[$2]:-}" ]] || t2_wp_changed=1
     return 0
   fi
   say "T2 ${3} (${mac_model}, ${bdf}): ${4}"
   gen="$(mktemp)"
   sed -e "s/@T2_AUDIO_PCI@/${t2_audio_pci}/g" -e "s/@MODEL@/${mac_name}/g" \
     "${SRC_DIR}/$1" > "$gen"
-  cmp -s -- "$gen" "$2" || t2_wp_changed=1
   install_file "$gen" "$2"
   rm -f -- "$gen"
+  [[ -z "${changed[$2]:-}" ]] || t2_wp_changed=1
 }
 wp_conf t2-audio-wireplumber.conf.in "$T2_SPEAKERS_CONF" \
   speakers "stereo \"${mac_name} Speakers\" sink"
@@ -483,6 +489,20 @@ wp_conf t2-audio-wireplumber.conf.in "$T2_SPEAKERS_CONF" \
 # source) depends on, as on pipewire-module-filter-chain-lv2.
 wp_conf t2-mic-wireplumber.conf.in /etc/wireplumber/wireplumber.conf.d/51-t2-mic.conf \
   microphone "+40 dB mono \"${mac_name} Microphone\" source"
+# Cursor: iMac20,x 5K panels are driven as two tiles on t2 kernels from 7.2.9
+# on, and mutter's hardware cursor flickers there.  Matched on the model, not
+# on the live tiling, so an install from a 7.2.8 boot (one eDP-1) still sets
+# it; there it only costs the hardware cursor.  See t2-sw-cursor.conf.
+SW_CURSOR_CONF=/etc/environment.d/90-t2-sw-cursor.conf
+case "$mac_model" in
+  iMac20,1|iMac20,2)
+    say "iMac 5K (${mac_model}): software cursor in GNOME (tiled-panel flicker)"
+    install_file "${SRC_DIR}/t2-sw-cursor.conf" "$SW_CURSOR_CONF"
+    ;;
+  *)
+    retire_file "$SW_CURSOR_CONF" "not an iMac20,x 5K panel"
+    ;;
+esac
 # tuned: shadow each stock profile with an [audio] unit, so it stops turning
 # HDMI audio power saving back on.  See t2-tuned-hda.conf.in.  Our own files
 # are not backed up: a backup would only hold an older generated copy.  One
@@ -712,6 +732,9 @@ say "✅ Installation complete."
 if (( t2_wp_changed && ! DRY_RUN )); then
   say "Speakers and microphone: log out and back in, or run as your user:"
   say "  systemctl --user restart wireplumber"
+fi
+if [[ -n "${changed[$SW_CURSOR_CONF]:-}" ]] && (( ! DRY_RUN )); then
+  say "Cursor: takes effect at the next login (log out and back in)"
 fi
 
 

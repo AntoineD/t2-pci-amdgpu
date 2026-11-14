@@ -188,6 +188,10 @@ done
 if (( wp_removed )); then
   say "Speakers and microphone: log out and back in, or run 'systemctl --user restart wireplumber' as your user"
 fi
+if [[ -e /etc/environment.d/90-t2-sw-cursor.conf ]]; then
+  offer_restore "/etc/environment.d/90-t2-sw-cursor.conf"
+  say "Cursor: the hardware cursor comes back at the next login"
+fi
 # tuned overrides from t2-tuned-hda.conf.in.  Only files carrying our marker
 # go, so a profile the user wrote under the same name stays; and only while
 # their settings are still the generated ones (tuned_is_pristine), so an edit
