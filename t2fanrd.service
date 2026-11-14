@@ -5,6 +5,10 @@ After=systemd-modules-load.service applesmc-late.service
 
 [Service]
 Type=simple
+# Not on kernels with macsmc_acpi (t2 kernels from 7.3 on): the SMC's own
+# curve drives the fan there, and this build only knows applesmc's
+# fan1_manual/fan1_output.  See t2fanrd-dropin.conf for the measurements.
+ExecCondition=/bin/sh -c '! modinfo -n macsmc_acpi >/dev/null 2>&1'
 # The T2 bridge module was renamed apple_bce -> t2bce_core in the 7.1 t2 kernel
 # (drivers/staging/t2bce).  Try both names, and keep both tolerant with "-":
 # a hard ExecStartPre failure fails the unit, Restart=always loops it forever,

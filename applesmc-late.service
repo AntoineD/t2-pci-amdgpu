@@ -4,6 +4,12 @@ After=systemd-udevd.service
 
 [Service]
 Type=oneshot
+# Kernels with macsmc_acpi (t2 kernels from 7.3 on) drive the SMC with macsmc,
+# and applesmc only hangs there (see /etc/modprobe.d/t2-applesmc.conf).  The
+# check is on the running kernel's modules, not on what is bound yet: at this
+# point macsmc_acpi may not have loaded.  Exit 1 skips the unit without
+# failing it ("exec-condition").
+ExecCondition=/bin/sh -c '! modinfo -n macsmc_acpi >/dev/null 2>&1'
 # Renamed apple_bce -> t2bce_core in the 7.1 t2 kernel (drivers/staging/t2bce).
 # Try both, tolerant: a hard failure here fails the unit and takes applesmc with it.
 # -q keeps the missing one from logging "FATAL: Module ... not found" every boot.
@@ -17,7 +23,8 @@ ExecStartPre=-/usr/sbin/modprobe -q apple_bce
 # 7.2.8-310.t2).  The legacy apple-bce name keeps the weaker driver-link test —
 # no such kernel was available to find its equivalent.  Leading "-" keeps this
 # best-effort: on hardware without the bridge the modprobe below still runs,
-# and applesmc does not actually need the bridge (it autoloads from DMI).
+# and applesmc does not actually need the bridge.  Its DMI autoload is
+# blacklisted (t2-applesmc.conf), so this modprobe is the one that loads it.
 ExecStartPre=-/usr/local/bin/t2-wait-sysfs.sh -t 15 '/sys/bus/pci/drivers/t2bce_core/0000:*/consumer:t2bce_vhci:*' '/sys/bus/pci/drivers/apple-bce/0000:*'
 ExecStart=/usr/sbin/modprobe applesmc
 

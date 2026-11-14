@@ -172,6 +172,7 @@ done
 # 5) Remove system config files
 # ---------------------------------------------------------------------------
 offer_restore "/etc/modprobe.d/amdgpu.conf"
+offer_restore "/etc/modprobe.d/t2-applesmc.conf"
 offer_restore "/etc/modprobe.d/t2-wifi-off.conf"
 offer_restore "/etc/modprobe.d/amdgpu-navi10-imac.conf"
 offer_restore "/etc/udev/rules.d/99-amdgpu-t2.rules"

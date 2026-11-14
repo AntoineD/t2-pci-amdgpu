@@ -40,7 +40,7 @@ The layers must execute in this order; each depends on the previous:
    Never write `remove` while `amdgpu_pci_probe()` is in flight: the write blocks on the device lock, then lands on the failing probe's cleanup path and oopses in `vcn_v2_0_sw_fini` on VCN state the unwind already freed — on iMac20,2, a boot wedged at the splash on 3 of 4 boots. The `driver` symlink cannot gate this, because `driver_sysfs_add()` creates it *before* the probe runs. Settled means DRM nodes under the PCI device (probe succeeded), or no `driver` symlink *and* amdgpu's module is `live` *and* the device is not on the deferred-probe list (failed and unbound). No symlink alone is not enough: a probe that has not started looks identical. On T2 the cold probe is normally *deferred* — amdgpu returns `-EPROBE_DEFER` via `vga_switcheroo_client_probe_defer()` until `apple_gmux` binds, then re-runs from `deferred_probe_work_func` — and with no udev-settle nothing orders the warmfix after gmux. The deferred list is `/sys/kernel/debug/devices_deferred`; without debugfs the script falls back to "ACPI `APP000B` present and no driver bound to its PNP node" (`APP000B:*/physical_node/driver`). Not `/sys/module/apple_gmux/initstate`: a built-in gmux has no such file, which read as deferred forever and cost a 60 s wait plus a failed unit. DRM nodes are not a hard end-of-probe signal either (`drm_dev_register()` precedes xcp/kfd/fbdev setup, which can still fail under the lock), so the settled state must hold for 1.5 s before a `remove`. The wait's deadlines run on `/proc/uptime` (read without a fork), not on a poll count: 600 polls with their forks drifted past the nominal 60 s. That wait cost 1.5–2.0 s on every boot, so end signals from outside sysfs shorten it. *Bound*: udev processed the `bind` uevent, which `driver_bound()` sends only after the probe returned 0; `99-amdgpu-t2.rules` records it as `AMDGPU_WARMFIX_BOUND=1` and clears it on `unbind` (udev keeps recorded properties across later events, so a stale record would pass a rebind's running probe for a finished one), and the wait ends at once. Never use udev's `DRIVER=` for this: `really_probe()` sets `dev->driver` before the probe runs, so any uevent during the probe carries it. *Fbdev*: the kernel logged `[drm] fbN: … frame buffer device` for this function, which also ends the wait at once. `amdgpu_pci_probe()` sets up fbdev after every step that can fail it; only debugfs (a failure is logged, not returned) and runtime PM (off, `runpm=0`) follow before `return 0`. It beats the bind record by ~0.86 s at boot (fbdev line at 8.475 s, bind seen at 9.337 s: udev is busy with amdgpu's child devices), and it survives switch-root, which the bind record does not. No fbdev device appears in sysfs on this kernel (only `fbcon`), so the kernel log is the only place to see it. *Failed*: the kernel logged `probe with driver amdgpu failed`. Both kernel-log signals count only when they are the last probe event logged for the function: every probe past the vga_switcheroo deferral logs `initializing kernel modesetting` first, so an earlier probe's lines (before a rescan or a rebind) are superseded. The window before a new probe logs its start is covered by also requiring the settled state. A failure still needs ~0.5 s of settled state: the line comes before `driver_sysfs_remove()` and the devres teardown, which run under the device lock (amdgpu's `ttm finalized` landed 25 ms after the line). The warmfix logs which signal ended the wait; `(no end signal seen)` means it fell back to the full ~1.5 s.
    Known gap: every reset boot loses HDMI/DP audio. The re-probe's PSP mode1 reset wipes `.1`'s config space (BAR0 reads 0 while the kernel still has it assigned), and amdgpu restores only `.0`. `snd_hda_intel` then fails with `CORB reset timeout … CORBRP = 65535` / "GPU sound probed, but not operational". **Do not fix this by removing `.1` again and rescanning after the reset.** Tried 2026-10-17 (reverted). On 7.2.8 a `remove` of a device whose HDA probe failed this way leaks its IRQ handler: `remove_proc_entry: removing non-empty directory 'irq/NN', leaking at least 'snd_hda_intel:cardN'`, on 6 of 6 boots. The fresh probe then oopsed in `azx_probe_work` on 2 of those 6 (`snd_dma_alloc_dir_pages`, `snd_hdac_bus_stop_cmd_io`, list-poison addresses). That wedged sound, gdm and shutdown, and needed a hard reset. Removing `.1` by hand on a booted system worked once, so it is the at-boot timing that loses. A safe fix must keep `snd_hda_intel` off `.1` until after the mode1 reset, not remove a failed card.
    A probe that never settles aborts the unit (exit 1) instead of removing anyway. On 7.2.9-310.t2 the probe worker oopses every boot and dies holding the device lock; the old "proceeding anyway" `remove` then sat in D state forever, unkillable, holding the display manager ~7 min. The wait shortens to 15s once `/proc/sys/kernel/tainted` has bit 128 (oops).
-   That kernel's cause: a new iMac20,x DMI quirk, `imac5k_table`, which registers the display IP block before SMU and lacks its `{}` terminator. Check any kernel's module with `nm -S amdgpu.ko | grep imac5k_table` (decompress the `.ko.xz` first): size `2b0` (2 × 344-byte entries, no sentinel) is broken.  `amdgpu-check.sh` runs this test on every kernel under `/lib/modules` and, as root, flags a broken one that is the GRUB default. No userspace step recovers a boot that hit it: the dead probe also wedges `wait_for_device_probe()`, so suspend and the final step of reboot hang too. Boot another kernel.
+   That kernel's cause: a new iMac20,x DMI quirk, `imac5k_table`, which registers the display IP block before SMU and lacks its `{}` terminator. Check any kernel's module with `nm -S amdgpu.ko | grep imac5k_table` (decompress the `.ko.xz` first): size `2b0` (2 × 344-byte entries, no sentinel) is broken, and `408` (the same two plus the terminator, as in 7.3.3-310.t2) is intact.  `amdgpu-check.sh` runs this test on every kernel under `/lib/modules` and, as root, flags a broken one that is the GRUB default. No userspace step recovers a boot that hit it: the dead probe also wedges `wait_for_device_probe()`, so suspend and the final step of reboot hang too. Boot another kernel.
    What the overrun does depends on the build's layout. The callback (`imac5K_support_callback`) returns 0, so `dmi_check_system()` does not stop at the match: it walks past entry 2 into the next `.rodata` object, whose bytes are relocated pointers (`ip_discovery_ktype` in the fc44 build), and reads `matches[0].slot` from a pointer's low byte. The fc43 7.2.9 build oopsed every boot. The fc44 build (gcc 16, also `0x2b0`) booted cleanly on 2026-10-18 (no oops, `imac5K_support attached`, dm before smu), but that is luck, not a fix.
    The quirk also changes the panel. On 7.2.9 the 5K panel is driven as two 2560×2880 tiles, `eDP-1` + `DP-1` (`DP-1` reads `connected` with no external display; GNOME merges them into one 5120×2880 monitor), with `dpcd_set_link_settings … failed` / `enabling link 1 failed: 15` at boot. On 7.2.8 there is one `eDP-1`, 3840×2160 at most. On iMac20,2 the 7.2.9 tiled mode showed flickering vertical lines around the cursor and clicked elements, and the shutdown splash drew the whole image in each tile; booting 7.2.8 removed the flicker. Which part (PSR on a tile, the hardware cursor across tiles, the link-1 training) was not isolated.
 
@@ -100,6 +100,10 @@ old value becomes sticky again.
 
 ## Fan loud at idle — daemon dead, not curve wrong
 
+This section, "Fan daemon config path" above and "Fan control across suspend"
+below describe applesmc kernels (7.2 and older), where t2fanrd runs. For 7.3+
+see "Fan on macsmc kernels" below.
+
 Distinguish the two loud-fan modes by whether RPM tracks the CPU at all. If RPM
 ramps while the package sits flat (measured: +551 RPM over 20 s at a constant
 40 °C), the daemon is not running and the SMC firmware curve is driving the fan
@@ -157,6 +161,60 @@ uses `systemctl try-restart` so a deliberately stopped daemon is not resurrected
 (`/sys/devices/LNXSYSTM:00/LNXSYBUS:00/PNP0A08:00/device:NN/APP0001:00/`). Use
 `/sys/bus/acpi/devices/APP0001:*/` instead — flat and stable. A `*` glob spans
 one path component only, so `/sys/devices/*/APP0001:*/` never matches.
+
+## Fan on macsmc kernels (t2 7.3+)
+
+The t2 kernels from 7.3 on bind the SMC (ACPI `APP0001`) with `macsmc_acpi`
+(linux-t2-patches 3001–3014): `macsmc_core`, plus `macsmc_hwmon` (the fan, 83
+temperatures and 45 powers on iMac20,2), `rtc_macsmc`, `macsmc_power` and
+`macsmc_wdt`. The applesmc sections above do not apply there: no `fan1_manual`,
+no `fan1_output`.
+
+- **applesmc must not load.** On 7.3.3-310.t2 its probe failed with `-EIO`
+  after 54 s, and its init with `driver init failed (ret=-5)` after 107 s, while
+  it polled the ports macsmc drives. Its loader hung for as long, and
+  `t2fanrd` (`After=applesmc-late`) started at 114 s, only to loop on the
+  `fan1_manual` wait. `t2-applesmc.conf` blacklists the DMI autoload on every
+  kernel. `applesmc-late` loads it explicitly, behind
+  `ExecCondition=/bin/sh -c '! modinfo -n macsmc_acpi …'`. The check reads the
+  running kernel's modules, not what is bound: macsmc_acpi may not have loaded
+  yet when the unit starts.
+- **The SMC's own curve drives the fan, and t2fanrd skips itself** (same
+  check; the package drop-in needs `+`, because `ProtectKernelModules=` hides
+  `/usr/lib/modules` from the sandbox). Measured 2026-11-13 on iMac20,2, 1 Hz:
+  - Idle: target 1200 for 10 min, through 40 min of normal use, and for 10 min
+    after a resume. The applesmc-era "loud at idle" and "loud after resume"
+    did not happen; why the SMC behaves differently is unknown.
+  - 8 busy threads: the target stayed at 1200 for 16 s (package ~91 °C), then
+    went 1200 → 2700 in 47 s. Meanwhile the package hit 100 °C for 11 s and the
+    SMC's CPU throttle key `PZ1T` read 20–97 W for 13 s. Then 2660–2740 RPM,
+    package 93.9 °C mean, 4349 MHz, 130 W: the same 93/100 °C as t2fanrd at
+    3600 RPM in 2026-07. Back to 1200 52 s after the load.
+  - glmark2 terrain (45 W): the target stayed at 1200 for ~290 s (junction
+    63–64 °C), then rose to ~2000 and peaked 14 s after the load ended. ~110 s
+    later came an idle pulse to ~1900 for 35 s, with every logged temperature
+    falling. A second run, logging all 128 SMC sensors, explains the shape:
+    its one pulse (to 2171 for 59 s, from 8 s after the load ended) lasted
+    exactly as long as an SMC power-zone event. For 29 s `PZ3T` ("Batt aux
+    Throttle") read 100 and the zone targets `PZ2E` (dGPU) and `PZ3E` read 0,
+    with no temperature crossing anything. It was the only such event in an
+    hour of logging. The SMC's own power logic, not a sensor threshold.
+  The SMC reads the GPU die (`TG0D`, equal to amdgpu's edge reading). The
+  packaged t2fanrd globs `card0` only.
+- **A daemon could not do much better.** `macsmc_hwmon` refuses a target
+  outside [`fan1_min`, `fan1_max`] with `-EINVAL`, so 2700 is the ceiling.
+  Writes need the unsafe `fan_control=1`, which taints the kernel; patch 9004
+  only makes `fan1_target` 0644. The packaged t2fanrd (`0.1.2-2.20261113git4b5439a`,
+  sharpenedblade branch `hwmon-support`) supports macsmc. It drives hwmon fans except
+  `name=amdgpu` (amdgpu exposes a phantom `fan1_target`, max 4950), sets
+  `fan_control=1` and writes `fan1_target`. On stop it writes nothing to a hwmon
+  fan, so the fan stays manual at the last RPM. The driver re-asserts manual
+  mode after a resume by itself. To run the daemon anyway, add a later drop-in
+  with empty `ExecCondition=` and `ExecStartPre=` (the drop-in's wait is for
+  applesmc's `fan1_manual`, which macsmc lacks). The binary must support macsmc:
+  `t2fanrd-dev` from `90-dev.conf` does not.
+- `rtc_macsmc` is `rtc0` (patch 3009 disables the other RTCs) and set the
+  system clock ~21 min fast at boot; chrony stepped it back.
 
 ## Slow S3 resume — Apple's macOS `_PS0` methods
 
@@ -303,9 +361,11 @@ a unit needs. Wait on the precondition instead, via `t2-wait-sysfs.sh` as an
 `t2-wait-sysfs.sh` checks `-e` on the first expansion: `nullglob` only drops
 words containing glob characters, so a literal path used to pass unexamined.
 
-Note `applesmc` autoloads from its DMI modalias during coldplug — on iMac20,2 it
-is already up at t=7.10 s, before `applesmc-late.service` even starts, so that
-unit's `modprobe` is normally a no-op. It is kept as insurance, not as the path.
+`applesmc` used to autoload from its DMI modalias during coldplug (on iMac20,2
+it was up at t=7.10 s, before `applesmc-late.service` started, so that unit's
+`modprobe` was a no-op). `t2-applesmc.conf` now blacklists that autoload, so on
+kernels without macsmc the unit's `modprobe` is the path; on macsmc kernels the
+unit skips itself (see "Fan on macsmc kernels").
 
 ## Key file relationships
 
@@ -328,6 +388,7 @@ unit's `modprobe` is normally a no-op. It is kept as insurance, not as the path.
 - `GFXALT-multi.aml` is the precompiled ACPI table. Recompile from `.dsl` with: `iasl -ve -tc GFXALT-multi.dsl`
 - `t2fanrd`: when the t2linux package is installed (`/usr/bin/t2fanrd` plus `/usr/lib/systemd/system/t2fanrd.service`), `install.sh` uses the package's build and sandboxed unit. It installs `t2fanrd-dropin.conf` as `t2fanrd.service.d/10-t2-pci-amdgpu.conf` and retires, with a backup, this repo's `/etc/systemd/system/t2fanrd.service` and `/usr/local/bin/t2fanrd`.
   The drop-in exists for these reasons:
+  - It skips the daemon on macsmc kernels (`ExecCondition=+…`; see "Fan on macsmc kernels").
   - It names `ExecStart=/usr/bin/t2fanrd`, because a bare `t2fanrd` resolves `/usr/local/bin` first.
   - It adds the sysfs wait and `RestartSec=5`. The package unit has neither, so with the 100 ms default an early start would use up the start limit.
   - It runs the hand-back as `ExecStopPost=+…`, outside the sandbox.

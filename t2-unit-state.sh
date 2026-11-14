@@ -29,15 +29,23 @@ journal_readable() {
 }
 
 for svc; do
-  load=$(systemctl show -p LoadState --value "$svc" 2>/dev/null || true)
+  # One call for all properties; systemctl prints them in its own order.
+  load="" active="" type="" result=""
+  while IFS='=' read -r key val; do
+    case "$key" in
+      LoadState) load=$val ;; ActiveState) active=$val ;;
+      Type) type=$val ;; Result) result=$val ;;
+    esac
+  done < <(systemctl show -p LoadState,ActiveState,Type,Result "$svc" 2>/dev/null || true)
   if [[ -z "$load" || "$load" == not-found ]]; then
     printf "%-24s enabled=%-9s active=%s\n" "$svc" "not-found" "not-found"
     continue
   fi
   enabled=$(systemctl is-enabled "$svc" 2>/dev/null || true)
-  active=$(systemctl is-active "$svc" 2>/dev/null || true)
-  type=$(systemctl show -p Type --value "$svc" 2>/dev/null || true)
-  if [[ "$type" == oneshot && "$active" == inactive ]]; then
+  if [[ "$active" == inactive && "$result" == exec-condition ]]; then
+    # ExecCondition= said no: applesmc-late and t2fanrd on a macsmc kernel.
+    active="skipped (ExecCondition)"
+  elif [[ "$type" == oneshot && "$active" == inactive ]]; then
     # not-run is normal for t2fanrd-resume until the first suspend/resume.
     if ! journal_readable; then
       active="inactive (run as root to tell ran-once from not-run)"

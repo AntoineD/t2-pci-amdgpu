@@ -55,9 +55,12 @@ fi
 # 7.2.9-310.t2 added an iMac20,x DMI quirk table, imac5k_table, without its {}
 # terminator: 0x2b0 bytes = 2 x 344-byte entries and no sentinel, so
 # dmi_check_system() reads past it.  Depending on the build that oopses the
-# probe or boots into a flickering 5K mode (CLAUDE.md, layer 4).  Flag such a
-# kernel before it is booted.
-# Only 0x2b0 is known broken; any other size is reported but not judged.
+# probe or boots by luck (CLAUDE.md, layer 4).  Flag such a kernel before it is
+# booted.  7.3.3-310.t2 ships it intact: 0x408 = the same two entries plus the
+# terminator.  The cursor flicker of the tiled 5K mode shows with both sizes,
+# so the overrun does not cause it.
+# Only 0x2b0 (broken) and 0x408 (intact) are known; any other size is reported
+# but not judged.
 echo
 say "Installed kernels (amdgpu imac5k_table quirk):"
 # The decompressed module is tens of MB; the EXIT trap removes it if the
@@ -97,9 +100,11 @@ else
     elif [[ -z "$size" ]]; then
       ok  "$kver$tags: no imac5k_table"
     elif [[ "$size" == "2b0" ]]; then
-      fail "$kver$tags: BROKEN imac5k_table (0x2b0, no terminator) — reads past the table; may oops at probe or flicker in 5K mode"
+      fail "$kver$tags: BROKEN imac5k_table (0x2b0, no terminator) — reads past the table; may oops at probe"
       [[ "$kver" == "$default_kver" ]] && \
         fail "  It is the GRUB default. Pick another: grubby --set-default /boot/vmlinuz-<good version>"
+    elif [[ "$size" == "408" ]]; then
+      ok  "$kver$tags: imac5k_table intact (0x408, 2 entries + terminator)"
     else
       warn "$kver$tags: imac5k_table size 0x$size — not a known-broken size, unverified"
     fi
@@ -259,41 +264,70 @@ for aud in /sys/bus/pci/devices/*; do
   fi
 done
 
-# --- Fan daemon ---------------------------------------------------------------
-# A dead or restart-looping t2fanrd leaves the fan to the SMC's own curve,
-# which ignores the CPU: loud at idle.  is-active alone hides a restart loop,
-# hence fan1_manual and NRestarts.
-echo
-say "Fan daemon:"
-smc=$(compgen -G '/sys/bus/acpi/devices/APP0001:*' | head -n1)
-[[ -n "$smc" ]] || smc=$(compgen -G '/sys/devices/platform/applesmc.*' | head -n1)
-fan_active=$(systemctl is-active t2fanrd.service 2>/dev/null)
-fan_restarts=$(systemctl show -p NRestarts --value t2fanrd.service 2>/dev/null)
-fan_exec=$(systemctl show -p ExecStart --value t2fanrd.service 2>/dev/null | sed -n 's/.*path=\([^ ;]*\).*/\1/p')
-if [[ "$fan_active" == active && "${fan_restarts:-0}" == 0 ]]; then
-  ok  "t2fanrd: active, no restarts (${fan_exec:-unknown binary})"
-else
-  fail "t2fanrd: ${fan_active:-unknown}, NRestarts=${fan_restarts:-?} — see: journalctl -u t2fanrd -b"
-fi
-if [[ "$fan_exec" == /usr/local/bin/t2fanrd && -x /usr/bin/t2fanrd ]]; then
-  warn "  Runs the bundled binary although the t2fanrd package is installed — re-run install.sh"
-fi
-if [[ -z "$smc" ]]; then
-  fail "applesmc fan attributes not found"
-else
-  manual=$(cat "$smc/fan1_manual" 2>/dev/null)
-  if [[ "$manual" == 1 ]]; then
-    ok  "fan1_manual=1 (t2fanrd holds the fan)"
-  else
-    fail "fan1_manual=${manual:-?} — the SMC drives the fan on its own curve"
-  fi
+# --- Fan ----------------------------------------------------------------------
+# Two set-ups, chosen by the running kernel:
+# - With macsmc_acpi (t2 kernels from 7.3 on), the SMC's own curve drives the
+#   fan, and t2fanrd and applesmc-late skip themselves (ExecCondition=).
+#   applesmc must stay unloaded: it competes with macsmc for the SMC.
+# - Otherwise applesmc + t2fanrd.  A dead or restart-looping t2fanrd leaves the
+#   fan to the SMC, which on those kernels ran it loud at idle.  is-active
+#   alone hides a restart loop, hence fan1_manual and NRestarts.
+# fan_line DIR TARGET_ATTR — RPM, target and range of fan1 under DIR.
+fan_line() {
   printf "  fan1: %s RPM (target %s, range %s–%s)\n" \
-    "$(cat "$smc/fan1_input" 2>/dev/null)" "$(cat "$smc/fan1_output" 2>/dev/null)" \
-    "$(cat "$smc/fan1_min" 2>/dev/null)" "$(cat "$smc/fan1_max" 2>/dev/null)"
-  # The daemon reads fan1_max once at start and never exceeds it; cold-boot
-  # starts have read 2700 although the SMC runs the fan to ~3600.
-  logged_max=$(journalctl -u t2fanrd -b -o cat --no-pager 2>/dev/null | sed -n 's/.*max_speed: \([0-9]*\).*/\1/p' | tail -n1)
-  [[ -n "$logged_max" ]] && echo "  daemon's speed limit (from its last start): $logged_max RPM"
+    "$(cat "$1/fan1_input" 2>/dev/null)" "$(cat "$1/$2" 2>/dev/null)" \
+    "$(cat "$1/fan1_min" 2>/dev/null)" "$(cat "$1/fan1_max" 2>/dev/null)"
+}
+echo
+say "Fan:"
+fan_active=$(systemctl is-active t2fanrd.service 2>/dev/null)
+fan_exec=$(systemctl show -p ExecStart --value t2fanrd.service 2>/dev/null | sed -n 's/.*path=\([^ ;]*\).*/\1/p')
+if modinfo -n macsmc_acpi &>/dev/null; then
+  macsmc_hw=$(grep -lx macsmc_hwmon /sys/class/hwmon/hwmon*/name 2>/dev/null | head -n1)
+  macsmc_hw=${macsmc_hw%/name}
+  if lsmod | grep -q '^applesmc'; then
+    fail "applesmc is loaded on a macsmc kernel — it competes with macsmc for the SMC (see /etc/modprobe.d/t2-applesmc.conf)"
+  fi
+  fan_control=$(cat /sys/module/macsmc_hwmon/parameters/fan_control 2>/dev/null)
+  if [[ "$fan_active" != active ]]; then
+    ok  "SMC firmware curve drives the fan (macsmc kernel: t2fanrd not used)"
+  elif [[ "$fan_control" == Y ]]; then
+    warn "t2fanrd drives the fan through macsmc (fan_control=Y; ${fan_exec:-unknown binary}) — ExecCondition overridden"
+  else
+    fail "t2fanrd is running but macsmc's fan_control=${fan_control:-?} — its writes are refused; the SMC keeps the fan"
+  fi
+  if [[ -z "$macsmc_hw" ]]; then
+    fail "macsmc_hwmon not found — no fan readings (is macsmc_acpi blacklisted?)"
+  else
+    fan_line "$macsmc_hw" fan1_target
+  fi
+else
+  smc=$(compgen -G '/sys/bus/acpi/devices/APP0001:*' | head -n1)
+  [[ -n "$smc" ]] || smc=$(compgen -G '/sys/devices/platform/applesmc.*' | head -n1)
+  fan_restarts=$(systemctl show -p NRestarts --value t2fanrd.service 2>/dev/null)
+  if [[ "$fan_active" == active && "${fan_restarts:-0}" == 0 ]]; then
+    ok  "t2fanrd: active, no restarts (${fan_exec:-unknown binary})"
+  else
+    fail "t2fanrd: ${fan_active:-unknown}, NRestarts=${fan_restarts:-?} — see: journalctl -u t2fanrd -b"
+  fi
+  if [[ "$fan_exec" == /usr/local/bin/t2fanrd && -x /usr/bin/t2fanrd ]]; then
+    warn "  Runs the bundled binary although the t2fanrd package is installed — re-run install.sh"
+  fi
+  if [[ -z "$smc" ]]; then
+    fail "applesmc fan attributes not found"
+  else
+    manual=$(cat "$smc/fan1_manual" 2>/dev/null)
+    if [[ "$manual" == 1 ]]; then
+      ok  "fan1_manual=1 (t2fanrd holds the fan)"
+    else
+      fail "fan1_manual=${manual:-?} — the SMC drives the fan on its own curve"
+    fi
+    fan_line "$smc" fan1_output
+    # The daemon reads fan1_max once at start and never exceeds it; cold-boot
+    # starts have read 2700 although the SMC runs the fan to ~3600.
+    logged_max=$(journalctl -u t2fanrd -b -o cat --no-pager 2>/dev/null | sed -n 's/.*max_speed: \([0-9]*\).*/\1/p' | tail -n1)
+    [[ -n "$logged_max" ]] && echo "  daemon's speed limit (from its last start): $logged_max RPM"
+  fi
 fi
 
 # --- CPU power profile --------------------------------------------------------

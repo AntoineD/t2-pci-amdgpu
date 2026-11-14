@@ -382,6 +382,11 @@ fi
 # ---------------------------------------------------------------------------
 if ! (( DRY_RUN )); then mkdir -p /etc/modprobe.d /etc/udev/rules.d "$DRACUT_DIR"; fi
 install_file "${SRC_DIR}/amdgpu.conf"               "/etc/modprobe.d/amdgpu.conf"
+# No DMI autoload of applesmc, so it never runs next to macsmc (t2 kernels from
+# 7.3 on), where it hangs its loader for ~107 s.  applesmc-late.service loads
+# it on the kernels that need it.  See t2-applesmc.conf.
+APPLESMC_CONF=/etc/modprobe.d/t2-applesmc.conf
+install_file "${SRC_DIR}/t2-applesmc.conf"          "$APPLESMC_CONF"
 # Navi 10 iMac20,x boards: keep memory-clock DPM out of the SMU's init request,
 # which their SMU hangs on (see amdgpu-navi10-imac.conf).  Matched on the exact
 # device and Apple subsystem IDs: other T2 GPUs keep full memory-clock DPM.
@@ -653,9 +658,16 @@ fi
 # ---------------------------------------------------------------------------
 if ! (( DRY_RUN )); then systemctl daemon-reload; fi
 enable_service "amdgpu-warmfix.service"
+# Enabled on every kernel: on one with macsmc_acpi both skip themselves at
+# start (ExecCondition=), and the same install still serves an older kernel
+# left in the boot menu.
 enable_service "t2fanrd.service"
 enable_service "t2fanrd-resume.service"
 enable_service "applesmc-late.service"
+if modinfo -n macsmc_acpi &>/dev/null; then
+  say "Fan: $(uname -r) drives the SMC with macsmc — the SMC's own curve runs the fan;"
+  say "  t2fanrd and applesmc-late skip themselves on this kernel"
+fi
 
 # t2fanrd reads /etc/t2fand.conf and its unit file only at start, so a running
 # daemon keeps the old band and the old ExecStartPre until it restarts — a
@@ -852,6 +864,7 @@ for f in "$ACPI_IMG" \
          /etc/udev/rules.d/99-amdgpu-t2.rules \
          /etc/udev/rules.d/99-t2-usb.rules \
          /etc/udev/rules.d/99-t2-wifi-off.rules \
+         "$APPLESMC_CONF" \
          "${initramfs_inputs[@]}"; do
   if (( $(mtime "$f") > boot_time )); then reboot_why+=("$f (changed since boot)"); fi
 done

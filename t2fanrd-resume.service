@@ -6,6 +6,8 @@
 # those writes, so the fan ramps up and stays loud until the daemon is
 # restarted by hand.  This unit does that restart automatically.
 #
+# Kernels with macsmc_acpi (7.3+) do not run t2fanrd, so there this is a no-op.
+#
 # suspend.target is ordered After=systemd-suspend.service, so a unit that is
 # both WantedBy= and After= the sleep targets runs on the way back up, not on
 # the way down.

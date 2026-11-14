@@ -11,7 +11,7 @@ needs it.
 Developed and tested on an **iMac20,2** (i7-10700K, Radeon Pro 5700). Most of
 it should work on other T2 Macs with an AMD GPU.
 
-**Tested on:** Fedora 43 and 44, t2linux kernels 7.1.x–7.2.x. A t2linux kernel
+**Tested on:** Fedora 43 and 44, t2linux kernels 7.1.x–7.3.x. A t2linux kernel
 must already be installed.
 
 | What you notice | What the fix does | Details |
@@ -22,6 +22,7 @@ must already be installed.
 | A USB device you plug in does not show up | Keeps the USB hubs awake | [USB devices not appearing](#usb-devices-not-appearing) |
 | iMac speakers: voices muffled or from one side, music hollow | Adds a proper stereo speaker output | [Speakers sound wrong](#speakers-sound-wrong-imac20x) |
 | iMac microphone: others barely hear you, dictation drops words | Adds an amplified microphone input | [Microphone too quiet](#microphone-too-quiet-imac20x) |
+| iMac 5K screen: flickering lines around the mouse pointer | Draws the pointer in software | [Lines around the pointer](#lines-around-the-pointer-imac20x) |
 
 ---
 
@@ -75,7 +76,15 @@ takes control back across every sleep. Older setups also wrote the daemon's
 config to a file it never reads, and used a temperature band so narrow that
 the fan saturated almost at once.
 
-**What the fix does:**
+**On t2 kernels 7.3 and later** the SMC has a new driver, `macsmc`, and the
+picture changes. The firmware's own curve was measured quiet at idle and after
+sleep, follows the GPU as well as the CPU, and reaches the fan's full speed
+under sustained load. So the fix leaves the fan to it there. It also keeps the
+old `applesmc` driver from loading, which on those kernels fails after hanging
+for almost two minutes at boot and stops the fan daemon from ever starting.
+The same install still runs the daemon when you boot an older kernel.
+
+**What the fix does on 7.2 and older kernels:**
 
 - Uses the t2linux `t2fanrd` package when it is installed, or a bundled build
   otherwise.
@@ -172,6 +181,7 @@ The installer will:
 6. Create `/etc/t2fand.conf`, or reconcile an existing one (see below), and
    restart a running `t2fanrd` so the change takes effect
 7. Enable `amdgpu-warmfix`, `t2fanrd`, `t2fanrd-resume`, and `applesmc-late` services
+   (on 7.3+ kernels `t2fanrd` and `applesmc-late` skip themselves at start)
 8. Create a display manager drop-in so the DM starts after warmfix
 9. End with an "Action required" list of only the steps this system still
    needs (GRUB edits, `grubby`, `dracut`, reboot), or "No action required"
@@ -181,7 +191,7 @@ The generated tuned overrides are the exception: a backup would only hold an
 older generated copy. Re-running the installer changes nothing that is already
 up to date.
 
-> **Note:** The T2Linux patched kernel (providing the T2 bridge driver, `t2bce_core` or `apple_bce` on older kernels, and `applesmc`) must already be installed.
+> **Note:** The T2Linux patched kernel (providing the T2 bridge driver, `t2bce_core` or `apple_bce` on older kernels, and `applesmc`, or `macsmc` from 7.3 on) must already be installed.
 
 ### GRUB configuration (required)
 
@@ -348,9 +358,12 @@ Run `sudo amdgpu-check.sh` — it will report the state of each layer and offer 
 The GPU is usually at a fixed slot (e.g. `0000:03:00.0` VGA, `0000:03:00.1` audio).
 Verify with `lspci -nn | grep VGA`. The installer detects the slot on every run, so re-run `sudo ./install.sh` after a hardware change; a manual edit of `/usr/local/bin/amdgpu-pci-reset-load.sh` is overwritten by the next install.
 
-**Fan loud and unrelated to CPU load** (ramps at idle, ignores a cool package):
-`t2fanrd` is not running, so the SMC is driving the fan on its own firmware
-curve — which follows chassis/ambient sensors, not the CPU package.
+**Fan loud and unrelated to CPU load** (ramps at idle, ignores a cool package),
+on 7.2 and older kernels: `t2fanrd` is not running, so the SMC is driving the
+fan on its own firmware curve — which follows chassis/ambient sensors, not the
+CPU package. On 7.3 and later the SMC's curve is the intended set-up, and
+`t2fanrd` and `applesmc-late` show as skipped; `amdgpu-check.sh` says which
+case applies.
 
 `amdgpu-check.sh` reports all of this under "Fan daemon". By hand:
 
