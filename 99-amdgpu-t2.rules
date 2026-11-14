@@ -28,7 +28,10 @@ ACTION=="add", SUBSYSTEM=="pci", \
 # (card1-eDP-1, card1-DP-1, ...) and simpledrm's card0, whose platform device
 # sits under the GPU: none has the attribute, so udev logged "Could not chase
 # sysfs attribute" about 7 times per boot.
-ACTION=="remove", GOTO="t2_gpu_dpm_end"
+# Only on "add": DRM sends "change" on the card at every connector hotplug, and
+# re-applying the saved level then would override one set by hand (LACT, sysfs).
+# t2-gpu-dpm.sh writes the level live itself, so it needs no event from here.
+ACTION!="add", GOTO="t2_gpu_dpm_end"
 SUBSYSTEM=="drm", KERNEL=="card*", KERNEL!="card*-*", DRIVERS=="amdgpu", \
   TEST=="device/power_dpm_force_performance_level", \
   ENV{T2_GPU_DPM}="low", GOTO="t2_gpu_dpm_set"

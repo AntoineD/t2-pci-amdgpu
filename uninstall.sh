@@ -95,6 +95,13 @@ offer_restore() {
     say "Restored: $file (from ${selected##*.bak.})"
   fi
 
+  # With choice 0 (also what a non-TTY stdin gives) keep every backup: one may
+  # be the user's pre-install original.
+  if (( choice == 0 )); then
+    say "Kept ${#backups[@]} backup(s) of $file"
+    return 0
+  fi
+
   # Clean up remaining backups.  The restored one was moved away, so skip it —
   # a bare `[[ -e ]] &&` here would end the loop body with status 1 and trip
   # `set -e` whenever the user restored the last entry in the list.
@@ -103,6 +110,7 @@ offer_restore() {
     rm -f -- "$b"
     say "Cleaned up backup: $b"
   done
+  return 0
 }
 
 (( DRY_RUN )) && say "=== DRY RUN — no changes will be made ==="
@@ -154,7 +162,15 @@ fi
 # ---------------------------------------------------------------------------
 # 4) Remove scripts and binaries from /usr/local/bin/
 # ---------------------------------------------------------------------------
-for f in amdgpu-pci-reset-load.sh amdgpu-check.sh t2-gpu-status.sh t2-wait-sysfs.sh t2-unit-state.sh t2-amd-nodes.sh t2-gpu-dpm.sh t2fanrd; do
+# The repo's *.sh, the way install.sh copies them, so a new helper needs no edit
+# here; plus the generated script, the bundled binary and names older installs
+# put there.
+bin_files=(amdgpu-pci-reset-load.sh t2fanrd)
+for f in "${SRC_DIR}"/*.sh; do
+  case "${f##*/}" in install.sh|uninstall.sh) continue ;; esac
+  bin_files+=("${f##*/}")
+done
+for f in "${bin_files[@]}"; do
   offer_restore "/usr/local/bin/$f"
 done
 
@@ -310,10 +326,12 @@ stale_initramfs=0
 if command -v lsinitrd &>/dev/null; then
   for img in /boot/initramfs-*.img; do
     [[ -e "$img" ]] || continue
-    for f in etc/modprobe.d/amdgpu.conf etc/modprobe.d/t2-wifi-off.conf etc/modprobe.d/amdgpu-navi10-imac.conf; do
-      [[ -n "$(lsinitrd -f "$f" "$img" 2>/dev/null)" ]] && stale_initramfs=1
-    done
-    if [[ "$(lsinitrd -f etc/cmdline.d/20-force_drivers.conf "$img" 2>/dev/null)" == *rd.driver.pre=amdgpu* ]]; then
+    # One listing per image: every lsinitrd call unpacks the whole image.  Its
+    # "dracut cmdline:" section carries the cmdline.d text, so the force_drivers
+    # line shows up in it too.
+    listing="$(lsinitrd "$img" 2>/dev/null)" || listing=""
+    if grep -qE '[[:space:]]etc/modprobe\.d/(amdgpu|t2-wifi-off|amdgpu-navi10-imac)\.conf( -> .*)?$' <<<"$listing" \
+       || grep -qF 'rd.driver.pre=amdgpu' <<<"$listing"; then
       stale_initramfs=1
     fi
   done

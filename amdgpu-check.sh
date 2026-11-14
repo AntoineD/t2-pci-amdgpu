@@ -63,21 +63,20 @@ fi
 # but not judged.
 echo
 say "Installed kernels (amdgpu imac5k_table quirk):"
-# The decompressed module is tens of MB; the EXIT trap removes it if the
-# check is interrupted mid-scan.
-imac5k_tmp=""
-trap 'rm -f -- "$imac5k_tmp"' EXIT
+# The decompressed module is tens of MB.  The file is made here, not inside
+# imac5k_size: that runs in a $(...) subshell, whose variables the EXIT trap
+# never sees, so an interrupted scan would leave the file behind.
+imac5k_tmp=$(mktemp) || imac5k_tmp=""
+trap '[[ -z "$imac5k_tmp" ]] || rm -f -- "$imac5k_tmp"' EXIT
 imac5k_size() {  # imac5k_size <amdgpu.ko[.xz|.zst]> — hex size, empty if absent
   local ko=$1 rc=0
-  imac5k_tmp=$(mktemp) || return 1
+  [[ -n "$imac5k_tmp" ]] || return 1
   case "$ko" in
     *.xz)  xz -dc "$ko"   >"$imac5k_tmp" 2>/dev/null ;;
     *.zst) zstd -dcq "$ko" >"$imac5k_tmp" 2>/dev/null ;;
     *)     cat "$ko"      >"$imac5k_tmp" ;;
   esac || rc=1
   (( rc )) || nm -S "$imac5k_tmp" 2>/dev/null | awk '$4 == "imac5k_table" { sub(/^0+/, "", $2); print $2 }'
-  rm -f -- "$imac5k_tmp"
-  imac5k_tmp=""
   return "$rc"
 }
 if ! command -v nm >/dev/null; then
@@ -197,17 +196,14 @@ else
   fi
   # Navi 10 iMac20,x boards need memory-clock DPM kept out of SMU init
   # (amdgpu-navi10-imac.conf); without it most cold probes fail.
-  ids="$(cat "$gpu_dev/device" "$gpu_dev/subsystem_vendor" "$gpu_dev/subsystem_device" 2>/dev/null | tr '\n' ':')"
-  case "$ids" in
-    0x731b:0x106b:0x021a:|0x7319:0x106b:0x021b:)
-      mask=$(cat /sys/module/amdgpu/parameters/ppfeaturemask 2>/dev/null)
-      if [[ -n "$mask" ]] && (( (mask & 0x2) == 0 )); then
-        ok  "ppfeaturemask=$mask: memory-clock DPM kept out of SMU init (Navi 10 iMac)"
-      else
-        warn "ppfeaturemask=${mask:-unknown} includes memory-clock DPM — cold probes on this board mostly fail; re-run install.sh and rebuild the initramfs"
-      fi
-      ;;
-  esac
+  if "$(dirname "${BASH_SOURCE[0]}")/t2-facts.sh" navi10-imac "$gpu_dev" >/dev/null; then
+    mask=$(cat /sys/module/amdgpu/parameters/ppfeaturemask 2>/dev/null)
+    if [[ -n "$mask" ]] && (( (mask & 0x2) == 0 )); then
+      ok  "ppfeaturemask=$mask: memory-clock DPM kept out of SMU init (Navi 10 iMac)"
+    else
+      warn "ppfeaturemask=${mask:-unknown} includes memory-clock DPM — cold probes on this board mostly fail; re-run install.sh and rebuild the initramfs"
+    fi
+  fi
   clocks=""
   for f in sclk mclk; do
     cur=$(grep -m1 '\*' "$gpu_dev/pp_dpm_$f" 2>/dev/null | awk '{print $2}')
@@ -268,11 +264,9 @@ done
 # install.sh only installs 51-t2-mic.conf with its LV2 limiter present, but a
 # later dnf autoremove can take the plugin away (nothing depends on it): the
 # filter then never starts and the default source records silence.  Same
-# files as T2_MIC_LV2 in install.sh.
+# files as install.sh: t2-facts.sh.
 if [[ -e /etc/wireplumber/wireplumber.conf.d/51-t2-mic.conf ]]; then
-  lv2_missing=()
-  [[ -e /usr/lib64/lv2/fast_lookahead_limiter-swh.lv2/plugin-Linux.so ]] || lv2_missing+=(lv2-swh-plugins)
-  [[ -e /usr/lib64/spa-0.2/filter-graph/libspa-filter-graph-plugin-lv2.so ]] || lv2_missing+=(pipewire-module-filter-chain-lv2)
+  mapfile -t lv2_missing < <("$(dirname "${BASH_SOURCE[0]}")/t2-facts.sh" mic-lv2-missing)
   if (( ${#lv2_missing[@]} )); then
     fail "T2 microphone filter: its limiter is missing, the mic records silence — sudo dnf install ${lv2_missing[*]}, then systemctl --user restart wireplumber"
   else
@@ -298,7 +292,7 @@ echo
 say "Fan:"
 fan_active=$(systemctl is-active t2fanrd.service 2>/dev/null)
 fan_exec=$(systemctl show -p ExecStart --value t2fanrd.service 2>/dev/null | sed -n 's/.*path=\([^ ;]*\).*/\1/p')
-if modinfo -n macsmc_acpi &>/dev/null; then
+if "$(dirname "${BASH_SOURCE[0]}")/t2-facts.sh" macsmc; then
   macsmc_hw=$(grep -lx macsmc_hwmon /sys/class/hwmon/hwmon*/name 2>/dev/null | head -n1)
   macsmc_hw=${macsmc_hw%/name}
   if lsmod | grep -q '^applesmc'; then

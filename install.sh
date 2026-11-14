@@ -256,9 +256,18 @@ tbt_table() {
       return 1
     fi
   else
-    mkdir -p -- "$STATE_DIR"
-    backup "$TBT_BIOS_FILE"
-    printf '%s\n' "$bios" > "$TBT_BIOS_FILE"
+    # Called as `tbt_table || true`, so errexit is off in here: check by hand.
+    # Without the record a later run would drop the patched table as stale.
+    # An identical record is left alone, no backup, no rewrite.
+    rec="$(cat -- "$TBT_BIOS_FILE" 2>/dev/null)" || rec=""
+    if [[ "$rec" != "$bios" ]]; then
+      if ! { mkdir -p -- "$STATE_DIR" && backup "$TBT_BIOS_FILE" \
+             && printf '%s\n' "$bios" > "$TBT_BIOS_FILE"; }; then
+        warn "Could not record the firmware version in ${TBT_BIOS_FILE} — Thunderbolt resume patch left out"
+        rm -f -- "$1/TbtOnPCH.aml"
+        return 1
+      fi
+    fi
   fi
   say "Thunderbolt resume patch: ${out}"
 }
@@ -399,16 +408,12 @@ install_file "${SRC_DIR}/t2-applesmc.conf"          "$APPLESMC_CONF"
 NAVI10_IMAC_CONF=/etc/modprobe.d/amdgpu-navi10-imac.conf
 navi10_imac=0
 if [[ -n "${slot:-}" ]]; then
-  gpu_ids=""
-  for f in device subsystem_vendor subsystem_device; do
-    gpu_ids+="$(cat "/sys/bus/pci/devices/0000:${slot}.0/$f" 2>/dev/null):"
-  done
-  case "$gpu_ids" in
-    0x731b:0x106b:0x021a:|0x7319:0x106b:0x021b:) navi10_imac=1 ;;
-  esac
+  if gpu_ids="$("${SRC_DIR}/t2-facts.sh" navi10-imac "/sys/bus/pci/devices/0000:${slot}.0")"; then
+    navi10_imac=1
+  fi
 fi
 if (( navi10_imac )); then
-  say "Navi 10 iMac GPU (${gpu_ids%:}): memory-clock DPM kept out of SMU init"
+  say "Navi 10 iMac GPU (${gpu_ids}): memory-clock DPM kept out of SMU init"
   install_file "${SRC_DIR}/amdgpu-navi10-imac.conf" "$NAVI10_IMAC_CONF"
 else
   retire_file "$NAVI10_IMAC_CONF" "not a Navi 10 iMac GPU"
@@ -428,11 +433,6 @@ fi
 # front of the 4 channels, which are two driver pairs, not front and rear.
 # See t2-audio-wireplumber.conf.in.
 T2_SPEAKERS_CONF=/etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf
-# The mic filter's limiter: file → package.  amdgpu-check.sh checks the same.
-declare -A T2_MIC_LV2=(
-  [/usr/lib64/lv2/fast_lookahead_limiter-swh.lv2/plugin-Linux.so]=lv2-swh-plugins
-  [/usr/lib64/spa-0.2/filter-graph/libspa-filter-graph-plugin-lv2.so]=pipewire-module-filter-chain-lv2
-)
 t2_speakers_why=""
 t2_audio_pci=""
 t2_wp_changed=0
@@ -492,15 +492,12 @@ wp_conf t2-audio-wireplumber.conf.in "$T2_SPEAKERS_CONF" \
 # Microphone: same Macs (no t2linux-audio profile, so no mic.json either).
 # The raw T2 mic has no gain control and arrives ~40 dB low; a mono source
 # in front of it adds the gain.  See t2-mic-wireplumber.conf.in.  Its limiter
-# is LV2 (T2_MIC_LV2), and nothing installed depends on those packages any
+# is LV2 (t2-facts.sh), and nothing installed depends on those packages any
 # more: t2linux-audio 3.0 dropped lv2-swh-plugins, and a dnf autoremove then
 # removed it.  A filter whose plugin is missing never starts, and the default
 # source records silence, so without them there is no filter.
 t2_mic_why=""
-lv2_missing=()
-for f in "${!T2_MIC_LV2[@]}"; do
-  [[ -e "$f" ]] || lv2_missing+=("${T2_MIC_LV2[$f]}")
-done
+mapfile -t lv2_missing < <("${SRC_DIR}/t2-facts.sh" mic-lv2-missing)
 if [[ -n "$t2_audio_pci" ]] && (( ${#lv2_missing[@]} )); then
   t2_mic_why="missing ${lv2_missing[*]}"
   warn "T2 microphone: install the limiter, then re-run: sudo dnf install ${lv2_missing[*]}"
@@ -585,7 +582,9 @@ if systemctl is-active --quiet tuned.service; then
   fi
 fi
 install_file "${SRC_DIR}/10-amdgpu-warmfix.conf"    "${DRACUT_DIR}/10-amdgpu-warmfix.conf"
-install_file "${SRC_DIR}/20-amdgpu-t2-cmdline.conf" "${DRACUT_DIR}/20-amdgpu-t2-cmdline.conf"
+# Older installs shipped a kernel_cmdline file.  dracut only uses that for the
+# initrd, never the kernel, and modprobe.d/amdgpu.conf already sets the options.
+retire_file "${DRACUT_DIR}/20-amdgpu-t2-cmdline.conf" "kernel_cmdline never reaches the kernel; amdgpu.conf sets the options"
 if ! (( DRY_RUN )); then
   udevadm control --reload-rules
   say "udev rules reloaded"
@@ -702,7 +701,7 @@ enable_service "amdgpu-warmfix.service"
 enable_service "t2fanrd.service"
 enable_service "t2fanrd-resume.service"
 enable_service "applesmc-late.service"
-if modinfo -n macsmc_acpi &>/dev/null; then
+if "${SRC_DIR}/t2-facts.sh" macsmc; then
   say "Fan: $(uname -r) drives the SMC with macsmc — the SMC's own curve runs the fan;"
   say "  t2fanrd and applesmc-late skip themselves on this kernel"
 fi
@@ -757,10 +756,11 @@ fi
 
 
 # cmdline_ok STRING — every REQUIRED_PARAMS word present, amdgpu not disabled
+# (nomodeset without an amdgpu.modeset= override)
 cmdline_ok() {
   local p
   for p in "${REQUIRED_PARAMS[@]}"; do has_word "$p" "$1" || return 1; done
-  ! has_word nomodeset "$1"
+  ! nomodeset_blocks "$1"
 }
 
 # mtime PATH — modification time in epoch seconds, 0 when PATH is missing.
@@ -789,13 +789,13 @@ else
   # read -ra, not an unquoted expansion: with nullglob set, a word containing
   # * ? or [ that matches no file would silently vanish from the line.
   read -ra cmdline_words <<<"$cur_cmdline"
+  # nomodeset keeps amdgpu from probing, unless an amdgpu.modeset= word
+  # overrides it (any value, 0 included: the parameter only overrides
+  # nomodeset, 1 = enable, -1 = auto).  Such a pair is left alone.
+  nomodeset_blocks "$cur_cmdline" && had_nomodeset=1
   for w in "${cmdline_words[@]}"; do
-    # nomodeset keeps amdgpu from probing.  amdgpu.modeset=0 does not: on
-    # current kernels the parameter only overrides nomodeset (1 = enable,
-    # -1 = auto), so it is left alone.
-    if [[ "$w" == nomodeset ]]; then
-      had_nomodeset=1          # drop it: amdgpu would not probe the GPU
-      continue
+    if [[ "$w" == nomodeset ]] && (( had_nomodeset )); then
+      continue                 # drop it: amdgpu would not probe the GPU
     fi
     merged+=("$w")
   done
@@ -818,7 +818,7 @@ generated_ok=1 entries_ok=1 entries_seen=0 entries_nomodeset=0
 note_entry() {
   entries_seen=$((entries_seen + 1))
   cmdline_ok "$1" || entries_ok=0
-  if has_word nomodeset "$1"; then
+  if nomodeset_blocks "$1"; then
     entries_nomodeset=1
   fi
 }
@@ -877,8 +877,8 @@ missing_inputs=()
 for f in "${initramfs_inputs[@]}"; do
   [[ -e "$f" || -n "${pending[$f]:-}" ]] || missing_inputs+=("${f#/}")
 done
-in_initramfs() {  # in_initramfs IMAGE PATH — PATH (no leading /) is in IMAGE
-  [[ -n "$(lsinitrd -f "$2" "$1" 2>/dev/null)" ]]
+in_initramfs() {  # in_initramfs LISTING PATH — PATH (no leading /) is in the lsinitrd LISTING
+  grep -qE "[[:space:]]$2( -> .*)?\$" <<<"$1"
 }
 stale_kvers=()
 for img in /boot/initramfs-*.img; do
@@ -886,9 +886,19 @@ for img in /boot/initramfs-*.img; do
   [[ -d "/lib/modules/${kver}" ]] || continue
   if (( $(mtime "$img") < newest_input )); then stale_kvers+=("$kver"); continue; fi
   if (( EUID == 0 )) && command -v lsinitrd &>/dev/null; then
+    # One listing per image: every lsinitrd call unpacks the whole image.
+    listing="$(lsinitrd "$img" 2>/dev/null)" || listing=""
+    stale=0
     for f in "${missing_inputs[@]}"; do
-      if in_initramfs "$img" "$f"; then stale_kvers+=("$kver"); break; fi
+      if in_initramfs "$listing" "$f"; then stale=1; break; fi
     done
+    # The retired kernel_cmdline file leaves its text in the image's cmdline
+    # section.  Its dry-run retirement is already in newest_input.
+    if [[ ! -e "${DRACUT_DIR}/20-amdgpu-t2-cmdline.conf" ]] \
+       && grep -qF 'pcie_aspm=off amdgpu.aspm=0 amdgpu.runpm=0' <<<"$listing"; then
+      stale=1
+    fi
+    if (( stale )); then stale_kvers+=("$kver"); fi
   fi
 done
 
@@ -910,7 +920,7 @@ for f in "$ACPI_IMG" \
   if (( $(mtime "$f") > boot_time )); then reboot_why+=("$f (changed since boot)"); fi
 done
 if ! cmdline_ok "$(cat /proc/cmdline)"; then
-  reboot_why+=("kernel parameters: /proc/cmdline lacks ${REQUIRED_PARAMS[*]} or has nomodeset")
+  reboot_why+=("kernel parameters: /proc/cmdline lacks ${REQUIRED_PARAMS[*]} or has nomodeset without an amdgpu.modeset= override")
 fi
 # The journal, not dmesg: the printk buffer wraps.  Judge only a journal that
 # still starts at the boot's first kernel line; journald may have vacuumed it.
@@ -984,7 +994,7 @@ if (( initrd_edit || cmdline_edit )); then
     (( ${#missing[@]} )) && \
       echo "      Missing ${#missing[@]} parameter(s): ${missing[*]}"
     (( had_nomodeset )) && \
-      warn "     nomodeset is set — it keeps amdgpu from probing the GPU; removing it below"
+      warn "     nomodeset is set without an amdgpu.modeset= override — it keeps amdgpu from probing the GPU; removing it below"
     echo "      Your existing parameters are kept. Replace the whole line with:"
     echo
     echo "        GRUB_CMDLINE_LINUX=\"${merged[*]}\""

@@ -51,6 +51,19 @@ grubenv_var() {
 # has_word WORD STRING — WORD is one of STRING's whitespace-separated words
 has_word() { [[ " $2 " == *[[:space:]]"$1"[[:space:]]* ]]; }
 
+# nomodeset_blocks STRING — STRING has nomodeset and nothing overrides it.  Any
+# amdgpu.modeset=<value> word re-enables the amdgpu probe (CLAUDE.md, layer 4),
+# the same combination the warmfix unit's conditions accept.
+nomodeset_blocks() {
+  local w words
+  has_word nomodeset "$1" || return 1
+  read -ra words <<<"$1"
+  for w in "${words[@]}"; do
+    [[ "$w" == amdgpu.modeset=* ]] && return 1
+  done
+  return 0
+}
+
 # names_acpi_img STRING — one of STRING's words is the ACPI override image,
 # bare (early_initrd, GRUB_EARLY_INITRD_LINUX_CUSTOM) or as a path (initrd lines)
 names_acpi_img() {

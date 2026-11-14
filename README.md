@@ -685,6 +685,7 @@ the T2 bridge binding, the `fan1_manual` attribute, or the GPU's PCI node.
 | `amdgpu-pci-reset-load.sh` | `/usr/local/bin/` (generated) | The warmfix itself, generated from `amdgpu-reset-pci-template` for the detected GPU slot; run by `amdgpu-warmfix.service` |
 | `t2-unit-state.sh` | `/usr/local/bin/` | Unit list and per-unit state (`ran-once`, `not-run`, …) shared by `amdgpu-check.sh` and `t2-gpu-status.sh` |
 | `t2-amd-nodes.sh` | `/usr/local/bin/` | Lists the DRM nodes under an AMD VGA function; shared by `amdgpu-check.sh` and `t2-gpu-status.sh` |
+| `t2-facts.sh` | `/usr/local/bin/` | Facts `install.sh` and `amdgpu-check.sh` both judge: the Navi 10 iMac GPU IDs, the mic filter's LV2 packages, and whether the kernel has `macsmc_acpi` |
 | `t2-tuned-audio.sh` | `/usr/local/bin/` | Prints what a tuned profile (the active one by default) does to `snd_hda_intel power_save_controller`, and which profile file decides it. Uses tuned's own loader, so includes and unit priorities resolve as in tuned. Called by `amdgpu-check.sh` and `install.sh` |
 | `t2-gpu-dpm.sh` | `/usr/local/bin/` | Shows or sets the GPU's DPM level (`low`, `auto`, `high`). Setting it saves `T2_GPU_DPM` in `/etc/t2-pci-amdgpu.conf` for every boot and applies it at once. See [GPU performance level](#gpu-performance-level) |
 | `t2-wait-sysfs.sh` | `/usr/local/bin/` | Blocks until a sysfs path matching any given glob appears. Used as `ExecStartPre=` in place of `udevadm settle` — waits for the one device the unit needs instead of the whole coldplug queue |
@@ -704,7 +705,6 @@ the T2 bridge binding, the `fan1_manual` attribute, or the GPU's PCI node.
 | `t2-mic-wireplumber.conf.in` | `/etc/wireplumber/wireplumber.conf.d/51-t2-mic.conf` (generated) | Same Macs as the speaker filter. Adds an "iMac Microphone" input that amplifies the raw T2 microphone by 40 dB, with a high-pass and a limiter. See [Microphone input in detail](#microphone-input-in-detail). |
 | `t2-tuned-hda.conf.in` | `/etc/tuned/profiles/<name>/tuned.conf` (generated) | Only when tuned is installed and the GPU has an HDMI audio function: one per stock profile with an `[audio]` section (`balanced`, `powersave`). Includes the stock profile and stops tuned from turning `snd_hda_intel power_save_controller` back on, which would let the GPU's HDMI audio function runtime-suspend. A same-name profile you wrote, or a generated one whose settings you edited, is left alone, and the installer says whether it still keeps the audio function awake. |
 | `10-amdgpu-warmfix.conf` | `/etc/dracut.conf.d/` | Embeds `amdgpu`, `nvme` and `thunderbolt` in the initramfs via `force_drivers`. Every name must resolve to a real module — `force_drivers` makes a missing one a fatal `dracut -f` error |
-| `20-amdgpu-t2-cmdline.conf` | `/etc/dracut.conf.d/` | Embeds kernel params as initramfs fallback (used only when bootloader passes no cmdline) |
 
 ### ACPI
 
