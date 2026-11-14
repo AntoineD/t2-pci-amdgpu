@@ -428,6 +428,11 @@ fi
 # front of the 4 channels, which are two driver pairs, not front and rear.
 # See t2-audio-wireplumber.conf.in.
 T2_SPEAKERS_CONF=/etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf
+# The mic filter's limiter: file → package.  amdgpu-check.sh checks the same.
+declare -A T2_MIC_LV2=(
+  [/usr/lib64/lv2/fast_lookahead_limiter-swh.lv2/plugin-Linux.so]=lv2-swh-plugins
+  [/usr/lib64/spa-0.2/filter-graph/libspa-filter-graph-plugin-lv2.so]=pipewire-module-filter-chain-lv2
+)
 t2_speakers_why=""
 t2_audio_pci=""
 t2_wp_changed=0
@@ -461,14 +466,16 @@ case "$mac_model" in
   MacBookAir*)  mac_name="MacBook Air" ;;
   Macmini*)     mac_name="Mac mini" ;;
 esac
-# wp_conf TEMPLATE DEST NAME DESC — generate DEST from TEMPLATE for this card and
-# install it, or retire DEST when there is no card to fit (t2_audio_pci empty).
+# wp_conf TEMPLATE DEST NAME DESC [WHY] — generate DEST from TEMPLATE for this
+# card and install it, or retire DEST when there is no card to fit
+# (t2_audio_pci empty) or WHY says why not.
 # Sets t2_wp_changed when DEST changes, for the "restart wireplumber" hint.
 wp_conf() {
-  local gen
-  if [[ -z "$t2_audio_pci" ]]; then
-    say "T2 ${3}: ${4} not needed — ${t2_speakers_why}"
-    retire_file "$2" "$t2_speakers_why"
+  local gen why="${5:-}"
+  [[ -n "$t2_audio_pci" ]] || why="$t2_speakers_why"
+  if [[ -n "$why" ]]; then
+    say "T2 ${3}: no ${4} — ${why}"
+    retire_file "$2" "$why"
     [[ -z "${changed[$2]:-}" ]] || t2_wp_changed=1
     return 0
   fi
@@ -485,10 +492,21 @@ wp_conf t2-audio-wireplumber.conf.in "$T2_SPEAKERS_CONF" \
 # Microphone: same Macs (no t2linux-audio profile, so no mic.json either).
 # The raw T2 mic has no gain control and arrives ~40 dB low; a mono source
 # in front of it adds the gain.  See t2-mic-wireplumber.conf.in.  Its limiter
-# comes from lv2-swh-plugins, which t2linux-audio (the UCM that names the raw
-# source) depends on, as on pipewire-module-filter-chain-lv2.
+# is LV2 (T2_MIC_LV2), and nothing installed depends on those packages any
+# more: t2linux-audio 3.0 dropped lv2-swh-plugins, and a dnf autoremove then
+# removed it.  A filter whose plugin is missing never starts, and the default
+# source records silence, so without them there is no filter.
+t2_mic_why=""
+lv2_missing=()
+for f in "${!T2_MIC_LV2[@]}"; do
+  [[ -e "$f" ]] || lv2_missing+=("${T2_MIC_LV2[$f]}")
+done
+if [[ -n "$t2_audio_pci" ]] && (( ${#lv2_missing[@]} )); then
+  t2_mic_why="missing ${lv2_missing[*]}"
+  warn "T2 microphone: install the limiter, then re-run: sudo dnf install ${lv2_missing[*]}"
+fi
 wp_conf t2-mic-wireplumber.conf.in /etc/wireplumber/wireplumber.conf.d/51-t2-mic.conf \
-  microphone "+40 dB mono \"${mac_name} Microphone\" source"
+  microphone "+40 dB mono \"${mac_name} Microphone\" source" "$t2_mic_why"
 # Cursor: iMac20,x 5K panels are driven as two tiles on t2 kernels from 7.2.9
 # on, and mutter's hardware cursor flickers there.  Matched on the model, not
 # on the live tiling, so an install from a 7.2.8 boot (one eDP-1) still sets

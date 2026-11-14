@@ -317,9 +317,16 @@ after their beamformer (mixer ×80, or 35 dB amp + 5 dB makeup), and there is
 none for `20_2`. `install.sh` generates `/etc/wireplumber/wireplumber.conf.d/51-t2-mic.conf`
 from `t2-mic-wireplumber.conf.in`, on the same gate as the speaker filter
 (one `wp_conf` helper generates, installs or retires both). Its limiter is LV2
-(`lv2-swh-plugins`, plus `pipewire-module-filter-chain-lv2`); there is no
-check, because both are dependencies of t2linux-audio, whose UCM gives the raw
-source the `HiFi__Mic__source` name the rule matches.
+(`lv2-swh-plugins`, plus `pipewire-module-filter-chain-lv2`). Nothing
+depends on either any more: t2linux-audio 3.0 (split into `t2linux-audio` +
+`-dsp`, 2026-11-10) dropped `lv2-swh-plugins`, and `dnf autoremove` removed it
+on 2026-11-14. The filter then fails (`lilv_lib_open … No such file`, `can't
+start graph`), and `t2_mic`, still the default source, records pure zeros,
+with `out of buffers` warnings every 2 s. So `install.sh` installs the file only
+when both are present (`T2_MIC_LV2`, else it retires it and prints the `dnf
+install`), and `amdgpu-check.sh` flags a missing plugin. Installing them by
+hand marks them user-installed, which autoremove leaves alone. The raw source
+keeps the `HiFi__Mic__source` name the rule matches from t2linux-audio's UCM.
 
 The graph, measured 2026-11-07 on iMac20,2:
 - Raw channels: AUX0 and AUX1 correlate 0.93 in 200–4000 Hz, and AUX1 has a

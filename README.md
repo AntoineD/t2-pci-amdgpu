@@ -620,8 +620,11 @@ The installer adds a WirePlumber filter
 **iMac Microphone** input: the mean of AUX0 and AUX1, amplified by 40 dB,
 with a 90 Hz high-pass that removes the DC offset and room rumble, and a
 limiter at −1 dBFS. The raw source is renamed **Raw Microphone (do not use)**.
-The limiter comes from `lv2-swh-plugins` and `pipewire-module-filter-chain-lv2`,
-which t2linux-audio already depends on.
+The limiter comes from `lv2-swh-plugins` and `pipewire-module-filter-chain-lv2`.
+Nothing pulls them in any more, so install them yourself
+(`sudo dnf install lv2-swh-plugins pipewire-module-filter-chain-lv2`). The
+installer skips the microphone filter without them, and `amdgpu-check.sh`
+flags them if they go missing later (a `dnf autoremove` removed one).
 
 It takes effect at the next login, or after `systemctl --user restart wireplumber`.
 Then:

@@ -49,7 +49,7 @@ node.software-dsp.rules = [
                               control = { "Gain 1" = 5.0 "Gain 2" = 5.0 } }
                             { type = builtin label = bq_highpass name = hp
                               control = { "Freq" = 90.0 "Q" = 0.707 } }
-                            # lv2-swh-plugins, a t2linux-audio dependency.
+                            # lv2-swh-plugins (install.sh checks for it).
                             # ingain is its input gain (max +20 dB).
                             { type = lv2 name = lim
                               plugin = "http://plugin.org.uk/swh-plugins/fastLookaheadLimiter"

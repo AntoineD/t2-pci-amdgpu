@@ -264,6 +264,22 @@ for aud in /sys/bus/pci/devices/*; do
   fi
 done
 
+# --- T2 microphone filter ----------------------------------------------------
+# install.sh only installs 51-t2-mic.conf with its LV2 limiter present, but a
+# later dnf autoremove can take the plugin away (nothing depends on it): the
+# filter then never starts and the default source records silence.  Same
+# files as T2_MIC_LV2 in install.sh.
+if [[ -e /etc/wireplumber/wireplumber.conf.d/51-t2-mic.conf ]]; then
+  lv2_missing=()
+  [[ -e /usr/lib64/lv2/fast_lookahead_limiter-swh.lv2/plugin-Linux.so ]] || lv2_missing+=(lv2-swh-plugins)
+  [[ -e /usr/lib64/spa-0.2/filter-graph/libspa-filter-graph-plugin-lv2.so ]] || lv2_missing+=(pipewire-module-filter-chain-lv2)
+  if (( ${#lv2_missing[@]} )); then
+    fail "T2 microphone filter: its limiter is missing, the mic records silence — sudo dnf install ${lv2_missing[*]}, then systemctl --user restart wireplumber"
+  else
+    ok  "T2 microphone filter: LV2 limiter present"
+  fi
+fi
+
 # --- Fan ----------------------------------------------------------------------
 # Two set-ups, chosen by the running kernel:
 # - With macsmc_acpi (t2 kernels from 7.3 on), the SMC's own curve drives the
