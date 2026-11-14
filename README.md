@@ -152,7 +152,7 @@ kind, not a faulty microphone: on iMac20,2 all three microphone capsules work.
 
 **What the fix does:** adds an **iMac Microphone** input that amplifies the
 built-in microphone by 40 dB, with a limiter so loud sounds do not distort.
-Choose it once as your input. See
+Choose it once as your input. The filter needs two packages, `lv2-swh-plugins` and `pipewire-module-filter-chain-lv2` (`sudo dnf install lv2-swh-plugins pipewire-module-filter-chain-lv2`). The installer skips the filter without them, and `amdgpu-check.sh` reports it if one goes missing later. See
 [Microphone input in detail](#microphone-input-in-detail).
 
 ---
@@ -245,7 +245,7 @@ GRUB_CMDLINE_LINUX="rhgb quiet pcie_aspm=off amdgpu.aspm=0 pci=noaer amdgpu.runp
 ```
 
 Also remove `nomodeset` from that line if present: it keeps `amdgpu` from
-probing the GPU. (`amdgpu.modeset=0` does not disable `amdgpu` on current
+probing the GPU. The installer counts `nomodeset` as a problem only when no `amdgpu.modeset=<value>` word is on the same command line. (`amdgpu.modeset=0` does not disable `amdgpu` on current
 kernels. The parameter only overrides `nomodeset`, and any value given,
 `0` included, re-enables it.)
 
@@ -268,7 +268,7 @@ Apply the parameters with grubby, which also updates `/etc/default/grub`:
 
 ```bash
 sudo grubby --update-kernel=ALL --args="pci=noaer pcie_aspm=off amdgpu.aspm=0 amdgpu.runpm=0"
-sudo grubby --update-kernel=ALL --remove-args=nomodeset
+sudo grubby --update-kernel=ALL --remove-args=nomodeset   # unless you also pass amdgpu.modeset=...
 ```
 
 The installer's closing "Action required" list gives the exact commands for your system, and only the ones still needed.
@@ -489,10 +489,7 @@ Measured on iMac20,2 (Radeon Pro 5700), `glmark2` terrain at 2560×1440:
 
 `auto` costs nothing at idle: the core sleeps between frames. `low` came from
 the t2linux hybrid-graphics guide's advice for MacBook dGPUs; nothing on this
-iMac needed it. The fan daemon follows the GPU temperature only when it finds
-the GPU's sensor, which the packaged T2FanRD does not do at boot (see
-CLAUDE.md, "Fan daemon config path"); in the 5-minute run the GPU stayed
-below the fan curve's 60 °C start until the last 30 s.
+iMac needed it. On 7.2 and older kernels the fan daemon follows the GPU temperature only when it finds the GPU's sensor, which the packaged T2FanRD does not do at boot (see CLAUDE.md, "Fan daemon config path"); in the 5-minute run the GPU stayed below the fan curve's 60 °C start until the last 30 s. On 7.3+ kernels the SMC's own curve drives the fan and reads the GPU die temperature: under a 45 W GPU load the fan stayed at 1200 RPM for about 290 s, then rose to about 2000.
 
 `high` holds the top clock even at idle and was not measured. If LACT's
 daemon (`lactd`) is enabled, it sets this level too; use LACT instead.
@@ -654,7 +651,7 @@ Without it, `parecord` remixes the channels and AUX2 comes back as all zeros.
 | File | Description |
 | --- | --- |
 | `install.sh` | Main installer — runs all steps below |
-| `uninstall.sh` | Removes all installed files, disables services, then prints the GRUB and initramfs cleanup steps this system still needs. `--all` also removes `/boot/acpi_override.img`, `/etc/t2fand.conf`, `/etc/t2-pci-amdgpu.conf` and `/var/lib/t2-pci-amdgpu`, but keeps the image while GRUB still loads it: GRUB loads no initramfs at all when one of its files is missing, and the system would not boot. `--dry-run` previews everything. |
+| `uninstall.sh` | Removes all installed files, disables services, then prints the GRUB and initramfs cleanup steps this system still needs. `--all` also removes `/boot/acpi_override.img`, `/etc/t2fand.conf`, `/etc/t2-pci-amdgpu.conf` and `/var/lib/t2-pci-amdgpu`, but keeps the image while GRUB still loads it: GRUB loads no initramfs at all when one of its files is missing, and the system would not boot. `--dry-run` previews everything. If you choose not to restore a backup, the backups are kept, since one may hold your pre-install original; when you restore one, the others are removed. |
 | `t2-grub-common.bash` | GRUB helpers sourced by both scripts (not installed) |
 | `t2-tuned.bash` | tuned override helpers sourced by both scripts (not installed) |
 | `amdgpu-reset-pci-template` | Template for the PCI reset script; `ADDR` is replaced with the detected slot at install time |
@@ -664,10 +661,10 @@ Without it, `parecord` remixes the channels and AUX2 comes back as all zeros.
 | File | Installed to | Description |
 | --- | --- | --- |
 | `amdgpu-warmfix.service` | `/etc/systemd/system/` | Runs the PCI reset at boot, before the display manager, if amdgpu's cold probe failed. Skips itself when `nomodeset` is set without an `amdgpu.modeset` override. |
-| `t2fanrd-dropin.conf` | `/etc/systemd/system/t2fanrd.service.d/10-t2-pci-amdgpu.conf` | When the t2linux `t2fanrd` package is installed (`/usr/bin/t2fanrd`): adds to the package's own unit the wait for the fan attribute, `RestartSec=5`, ordering after `applesmc-late`, and handing the fan back to the SMC on stop. The package's sandboxed unit and newer build are used as they are. |
-| `t2fanrd.service` | `/etc/systemd/system/` | Fallback without the package: runs the bundled T2 fan daemon |
-| `t2fanrd-resume.service` | `/etc/systemd/system/` | Restarts `t2fanrd` after resume — the SMC drops manual fan control across S3, so without this the fan runs loud until the daemon is restarted by hand |
-| `applesmc-late.service` | `/etc/systemd/system/` | Loads `applesmc` once the T2 bridge driver has bound (`t2bce_core`; `apple-bce` before the 7.1 t2 kernel) |
+| `t2fanrd-dropin.conf` | `/etc/systemd/system/t2fanrd.service.d/10-t2-pci-amdgpu.conf` | When the t2linux `t2fanrd` package is installed (`/usr/bin/t2fanrd`): adds to the package's own unit the wait for the fan attribute, `RestartSec=5`, ordering after `applesmc-late`, and handing the fan back to the SMC on stop. It also skips the daemon on 7.3+ kernels (`macsmc_acpi`), where the SMC drives the fan. The package's sandboxed unit and newer build are used as they are. |
+| `t2fanrd.service` | `/etc/systemd/system/` | Fallback without the package: runs the bundled T2 fan daemon (it also skips itself on 7.3+ kernels) |
+| `t2fanrd-resume.service` | `/etc/systemd/system/` | Restarts `t2fanrd` after resume — the SMC drops manual fan control across S3, so without this the fan runs loud until the daemon is restarted by hand. On 7.3+ kernels the daemon is not running, so this restarts nothing |
+| `applesmc-late.service` | `/etc/systemd/system/` | Loads `applesmc` once the T2 bridge driver has bound (`t2bce_core`; `apple-bce` before the 7.1 t2 kernel). Skips itself on kernels with `macsmc_acpi` (t2 7.3+), where `applesmc` must not load |
 
 None of these units order themselves after `systemd-udev-settle.service`. It is
 deprecated — systemd logs `systemd-udev-settle.service is deprecated. Please fix
@@ -703,6 +700,8 @@ the T2 bridge binding, the `fan1_manual` attribute, or the GPU's PCI node.
 | `t2-wifi-off.conf` | `/etc/modprobe.d/` | Only with `install.sh --disable-wifi`. Blacklists `brcmfmac`, which without Apple's firmware files only fails its probe and logs a `__flush_work` warning every boot. |
 | `t2-audio-wireplumber.conf.in` | `/etc/wireplumber/wireplumber.conf.d/50-t2-stereo-speakers.conf` (generated) | Only on T2 Macs whose speakers are one 4-channel output and that have no t2linux-audio speaker profile (iMac20,x). Adds a stereo "iMac Speakers" output in front of it and gives the card, raw speaker output and headset mic clearer names. See [Speaker output in detail](#speaker-output-in-detail). |
 | `t2-mic-wireplumber.conf.in` | `/etc/wireplumber/wireplumber.conf.d/51-t2-mic.conf` (generated) | Same Macs as the speaker filter. Adds an "iMac Microphone" input that amplifies the raw T2 microphone by 40 dB, with a high-pass and a limiter. See [Microphone input in detail](#microphone-input-in-detail). |
+| `t2-applesmc.conf` | `/etc/modprobe.d/` | Blacklists `applesmc`'s automatic load on every kernel. `applesmc-late.service` loads it explicitly on kernels without `macsmc_acpi`. On 7.3+ kernels `applesmc` hangs for almost two minutes and then fails, so it must not load there. |
+| `t2-sw-cursor.conf` | `/etc/environment.d/90-t2-sw-cursor.conf` | Only on iMac20,1 and iMac20,2. Sets `MUTTER_DEBUG_DISABLE_HW_CURSORS=1`, so GNOME draws the pointer in software. Takes effect at your next login. See [Lines around the pointer](#lines-around-the-pointer-imac20x). |
 | `t2-tuned-hda.conf.in` | `/etc/tuned/profiles/<name>/tuned.conf` (generated) | Only when tuned is installed and the GPU has an HDMI audio function: one per stock profile with an `[audio]` section (`balanced`, `powersave`). Includes the stock profile and stops tuned from turning `snd_hda_intel power_save_controller` back on, which would let the GPU's HDMI audio function runtime-suspend. A same-name profile you wrote, or a generated one whose settings you edited, is left alone, and the installer says whether it still keeps the audio function awake. |
 | `10-amdgpu-warmfix.conf` | `/etc/dracut.conf.d/` | Embeds `amdgpu`, `nvme` and `thunderbolt` in the initramfs via `force_drivers`. Every name must resolve to a real module — `force_drivers` makes a missing one a fatal `dracut -f` error |
 
@@ -722,7 +721,9 @@ the T2 bridge binding, the `fan1_manual` attribute, or the GPU's PCI node.
 - On a boot where the warmfix has to reset the GPU, HDMI/DP audio is lost until the next boot: the reset wipes the GPU's audio function. With the setting above this should no longer happen on Navi 10 iMacs.
 - On first-attempt GPU init failure, the screen may show a horizontal corruption artifact for ~15–20 seconds. The warmfix retries automatically and the driver loads correctly.
 - After such an event, rebooting into macOS may trigger 1–2 crash reports (`remoted` watchdog) and one automatic reboot within the first 5 minutes. macOS then runs normally.
-- On the 7.2.8 t2 kernel the 5K panel tops out at 3840×2160. The 7.2.9-310.t2 kernels drive it at 5120×2880 as two tiles, but on iMac20,2 that showed flickering lines around the cursor, and those kernels' new iMac quirk table (`imac5k_table`) has no terminator. The fc43 build oopsed the GPU probe on every boot, and the fc44 build booted only by luck. `amdgpu-check.sh` flags any installed kernel with the broken table. Stay on 7.2.8 until a fixed kernel ships.
+- On the 7.2.8 t2 kernel the 5K panel is one `eDP-1` that tops out at 3840×2160. The 7.2.9 and later kernels drive it at 5120×2880 as two tiles. The 7.2.9-310.t2 and 7.2.15-310.t2 builds have an iMac quirk table (`imac5k_table`) with no terminator. The fc43 build of 7.2.9 oopsed the GPU probe on every boot, and the fc44 build booted only by luck. `amdgpu-check.sh` flags any installed kernel with the broken table, so avoid those builds. 7.3.3-310.t2 has the table intact, and 7.3.3 or later is fine. In tiled mode the hardware pointer draws flickering lines; the installer's software-cursor setting removes them (see [Lines around the pointer](#lines-around-the-pointer-imac20x)).
+- In tiled 5K mode (7.2.9 and later, seen on iMac20,2) the kernel logs `dpcd_set_link_settings … failed` and `enabling link 1 failed: 15` at boot and at resume. Nothing has broken because of it so far. You may also see tearing at the seam between the two halves when things move, and a slight colour difference between the halves. The shutdown splash is drawn whole in each half.
+- On 7.3+ kernels the SMC's clock is the system clock (`rtc_macsmc`), and it drifts about 4.5 s per day. A clock that was 21 minutes fast at boot was fixed once with `sudo hwclock --systohc`. NTP (chrony) corrects the rest at each boot.
 
 ---
 
